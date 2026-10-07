@@ -1,56 +1,65 @@
 # Tiny Tapeout project information
 project:
-  title:        ""      # Project title
+  title:        "Multi-mode neural data compressor"      # Project title
   author:       ""      # Your name
   discord:      ""      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
-  description:  ""      # One line description of what your project does
-  language:     "Verilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
-  clock_hz:     0       # Clock frequency in Hz (or 0 if not applicable)
+  description:  "Lossy (5/3 DWT + rANS), delta + Rice, binned-spike and spike-band-power compression of a multiplexed 10-bit ADC stream"      # One line description of what your project does
+  language:     "SystemVerilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
+  clock_hz:     5000000        # Clock frequency in Hz: 5 MHz = ADC slot rate (docs/constraints.md D2)
 
   # How many tiles your design occupies? A single tile is about 167x108 uM.
-  tiles: "1x1"          # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2 or 8x2
+  tiles: "8x2"          # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2 or 8x2
 
   # Your top module name must start with "tt_um_". Make it unique by including your github username:
-  top_module:  "tt_um_example"
+  top_module:  "tt_um_nlc_compressor"
 
   # List your project's source files here.
   # Source files must be in ./src and you must list each source file separately, one per line.
   # Don't forget to also update `PROJECT_SOURCES` in test/Makefile.
   source_files:
     - "project.v"
+    - "nlc_core.v"
+    - "nlc_cfg.v"
+    - "nlc_slot_sel.v"
+    - "nlc_out_fifo.v"
+    - "nlc_encoder.v"
+    - "nlc_lossy.sv"
+    - "nlc_lift53.sv"
+    - "nlc_rans.sv"
+    - "nlc_lossy_rom.v"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 # This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
 pinout:
   # Inputs
-  ui[0]: ""
-  ui[1]: ""
-  ui[2]: ""
-  ui[3]: ""
-  ui[4]: ""
-  ui[5]: ""
-  ui[6]: ""
-  ui[7]: ""
+  ui[0]: "SAMPLE0 / CFG0"
+  ui[1]: "SAMPLE1 / CFG1"
+  ui[2]: "SAMPLE2 / CFG2"
+  ui[3]: "SAMPLE3 / CFG3"
+  ui[4]: "SAMPLE4 / CFG4"
+  ui[5]: "SAMPLE5 / CFG5"
+  ui[6]: "SAMPLE6 / CFG6"
+  ui[7]: "SAMPLE7 / CFG7"
 
   # Outputs
-  uo[0]: ""
-  uo[1]: ""
-  uo[2]: ""
-  uo[3]: ""
-  uo[4]: ""
-  uo[5]: ""
-  uo[6]: ""
-  uo[7]: ""
+  uo[0]: "M_DATA0"
+  uo[1]: "M_DATA1"
+  uo[2]: "M_DATA2"
+  uo[3]: "M_DATA3"
+  uo[4]: "M_DATA4"
+  uo[5]: "M_DATA5"
+  uo[6]: "M_DATA6"
+  uo[7]: "M_DATA7"
 
   # Bidirectional pins
-  uio[0]: ""
-  uio[1]: ""
-  uio[2]: ""
-  uio[3]: ""
-  uio[4]: ""
-  uio[5]: ""
-  uio[6]: ""
-  uio[7]: ""
+  uio[0]: "SAMPLE8 (in)"
+  uio[1]: "SAMPLE9 (in)"
+  uio[2]: "S_STROBE (in)"
+  uio[3]: "S_FRAME (in)"
+  uio[4]: "M_ACK (in)"
+  uio[5]: "CFG_EN (in)"
+  uio[6]: "M_VALID (out)"
+  uio[7]: "M_LAST (out)"
 
 # Do not change!
 yaml_version: 6
