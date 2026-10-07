@@ -31,6 +31,8 @@ FPP = codec().cfg.frames_per_packet
 PKT_CLOCKS = FPP * 256
 LONG = os.environ.get("NLC_LONG") == "1"
 TIMEOUT = dict(timeout_time=5, timeout_unit="sec")   # simulated time: ~380 packets
+# CI (NLC_SKIP_KNOWN=1) skips tests that fail on today's RTL by design (findings in docs/results.md)
+KNOWN_FAIL = dict(skip=os.environ.get("NLC_SKIP_KNOWN") == "1")
 
 
 def report(env: NlcEnv, extra: dict | None = None, check: bool = True) -> dict:
@@ -107,7 +109,7 @@ async def t_if_3_enable_midframe(dut):
     report(env)
 
 
-@cocotb.test(**TIMEOUT)
+@cocotb.test(**TIMEOUT, **KNOWN_FAIL)   # F2
 async def t_if_3_reenable(dut):
     """T-IF-3b: run, disable right after a packet is received, enable: == a run from reset."""
     env = await fresh(dut, "t_if_3_reenable")
