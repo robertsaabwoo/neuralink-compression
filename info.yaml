@@ -1,9 +1,9 @@
 # Tiny Tapeout project information
 project:
-  title:        "Multi-mode neural data compressor"      # Project title
-  author:       ""      # Your name
+  title:        "Lossy neural data compressor"      # Project title
+  author:       "Robert Saab"      # Your name
   discord:      ""      # Your discord username, for communication and automatically assigning you a Tapeout role (optional)
-  description:  "Lossy (5/3 DWT + rANS), delta + Rice, binned-spike and spike-band-power compression of a multiplexed 10-bit ADC stream"      # One line description of what your project does
+  description:  "Lossy compression (5/3 wavelet + rANS) of 8 channels from a multiplexed 10-bit ADC stream"      # One line description of what your project does
   language:     "SystemVerilog" # other examples include SystemVerilog, Amaranth, VHDL, etc
   clock_hz:     5000000        # Clock frequency in Hz: 5 MHz = ADC slot rate (docs/constraints.md D2)
 

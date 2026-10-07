@@ -10,10 +10,16 @@
 SIM ?= icarus
 FST ?= -fst
 TOPLEVEL_LANG ?= verilog
-SRC_DIR = $(PWD)/../src
+SRC_DIR = $(CURDIR)/../src
 PROJECT_SOURCES = project.v nlc_core.v nlc_cfg.v nlc_slot_sel.v nlc_out_fifo.v nlc_encoder.v nlc_lossy.sv nlc_lift53.sv nlc_rans.sv nlc_lossy_rom.v
 ENCODER ?= user
 export ENCODER
+
+# golden vectors are generated, not committed: make them on first use (TT's CI runs plain `make`)
+ifeq ($(wildcard $(CURDIR)/vectors/lossy/expected.hex),)
+$(info generating test/vectors from the golden model)
+$(shell cd $(CURDIR)/.. && python scripts/gen_vectors.py --out test/vectors >&2)
+endif
 
 ifeq ($(GATES),local)
 
@@ -27,7 +33,7 @@ else ifneq ($(GATES),yes)
 ifeq ($(ENCODER),replay)
 SIM_BUILD = sim_build/replay
 VERILOG_SOURCES += $(addprefix $(SRC_DIR)/,$(filter-out nlc_encoder.v,$(PROJECT_SOURCES)))
-VERILOG_SOURCES += $(PWD)/mock/nlc_encoder_replay.v
+VERILOG_SOURCES += $(CURDIR)/mock/nlc_encoder_replay.v
 else
 SIM_BUILD = sim_build/rtl
 VERILOG_SOURCES += $(addprefix $(SRC_DIR)/,$(PROJECT_SOURCES))
@@ -43,12 +49,12 @@ COMPILE_ARGS += -DSIM
 COMPILE_ARGS += -DUNIT_DELAY=\#1
 VERILOG_SOURCES += $(PDK_ROOT)/sky130A/libs.ref/sky130_fd_sc_hd/verilog/primitives.v
 VERILOG_SOURCES += $(PDK_ROOT)/sky130A/libs.ref/sky130_fd_sc_hd/verilog/sky130_fd_sc_hd.v
-VERILOG_SOURCES += $(PWD)/gate_level_netlist.v
+VERILOG_SOURCES += $(CURDIR)/gate_level_netlist.v
 
 endif
 
 COMPILE_ARGS += -I$(SRC_DIR) -g2012
-VERILOG_SOURCES += $(PWD)/tb.v
+VERILOG_SOURCES += $(CURDIR)/tb.v
 TOPLEVEL = tb
 COCOTB_TEST_MODULES = test_plumbing,test_modes
 

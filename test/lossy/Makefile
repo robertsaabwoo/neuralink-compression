@@ -6,7 +6,7 @@
 
 SIM ?= icarus
 TOPLEVEL_LANG ?= verilog
-SRC = $(PWD)/../../src
+SRC = $(CURDIR)/../../src
 COMPILE_ARGS += -g2012 -I$(SRC)
 TOPLEVEL = nlc_lossy
 COCOTB_TEST_MODULES ?= test_lossy
@@ -18,7 +18,7 @@ else
 NLC_PDK ?= /pdk
 SIM_BUILD = sim_build/gl
 VERILOG_SOURCES = $(NETLIST) $(NLC_PDK)/verilog/primitives.v $(NLC_PDK)/verilog/sky130_fd_sc_hd.v \
-                  $(PWD)/gl_dump.v
+                  $(CURDIR)/gl_dump.v
 COMPILE_ARGS += -DFUNCTIONAL -DUNIT_DELAY=\#1 -s gl_dump
 endif
 

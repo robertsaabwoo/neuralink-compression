@@ -9,13 +9,13 @@
 
 SIM ?= icarus
 TOPLEVEL_LANG ?= verilog
-SRC = $(PWD)/../../src
+SRC = $(CURDIR)/../../src
 COMPILE_ARGS += -g2012 -I$(SRC)
 TOPLEVEL = nlc_core
 COCOTB_TEST_MODULES ?= test_core
 SIM_BUILD = sim_build/rtl
 VERILOG_SOURCES = $(addprefix $(SRC)/,nlc_core.v nlc_cfg.v nlc_slot_sel.v nlc_out_fifo.v \
                   nlc_encoder.v nlc_lossy.sv nlc_lift53.sv nlc_rans.sv nlc_lossy_rom.v)
-export PYTHONPATH := $(PWD)/../env:$(PYTHONPATH)
+export PYTHONPATH := $(CURDIR)/../env:$(PYTHONPATH)
 
 include $(shell cocotb-config --makefiles)/Makefile.sim
