@@ -1,0 +1,308 @@
+# Testing: what exists, what it showed, what to build
+
+Companion to `docs/constraints.md` (requirements, IDs `C-*`), `docs/platform.md` (sources) and `docs/budgets.md` (pass/fail numbers).
+Quick view of everything from a terminal: `python scripts/status.py`.
+
+## 1. How to run
+
+| command | what | time |
+|---|---|---|
+| `python scripts/status.py` | read-only summary: direction, repo state, last results, budgets, open items | 1 s |
+| `python nlc.py algo` | model tests, compression on held-out files, `algo_eval.py` (rate, SNR, generalisation, spikes, max error) | ~10 min (`--quick` 2 min) |
+| `python nlc.py sim` | model, lint, every RTL suite incl. `test/core` (`nlc_core` at the real interface) | ~45 min (`--quick`: T-IF only) |
+| `python nlc.py synth` / `sta` / `gate_sim` / `power` | area / timing / gate level (lossy core + TT top) / power scenarios | 3 / 1 / 10 / 25 min |
+| `python nlc.py all` | everything (T2), scored against `scripts/flow/budgets.json` | ~1.5 h |
+| `python nlc.py report` | print `reports/latest/summary.md` | |
+| `python nlc.py accept` | accept the current bitstream as the golden reference (T-CHG-7) | |
+| `pytest` | golden-model unit tests incl. the change guard (host Python) | 30 s |
+| `docker run --rm -v "$PWD:/work" -w /work/test/core nlc-flow make COCOTB_TEST_FILTER=t_if_1` | one cocotb suite or test (also `test/`, `test/lossy`, `test/rans` with `TOP=static/adaptive`) | 0.5-40 min |
+
+`nlc.py` wraps `scripts/check.py` (steps `model lint rtl core synth sta gl power compress algo`,
+`--only`, `--quick`, `--native`, `--update-baseline`). `make` in a cocotb folder cannot take a
+`|` in `COCOTB_TEST_FILTER` (the shell pipes it); use a prefix or a character class.
+
+`check.py` runs inside the `nlc-flow` image (build once: `python docker/fetch_inputs.py && docker build -t nlc-flow docker`).
+Results: `reports/latest/summary.md`, `reports/latest/metrics.json`, logs and netlists next to them.
+
+## 2. Inventory of existing tests
+
+### 2.1 Golden model (`model/tests`, pytest, 47 tests)
+| file | covers |
+|---|---|
+| `test_bitstream.py` | MSB-first bit packing, unary/truncated unary, overflow/overread errors |
+| `test_lossless.py` | mode 0: hand-computed vector, zigzag, Rice k selection, round trips (incl. escape), compression |
+| `test_lossy.py` | mode 1: integer lifting perfect reconstruction, **streaming lifting == block transform**, production order covers every coefficient once, **FIFO peak 7 / lag 6 frames**, rANS round trip, escapes, n_flush, quality (SNR > 10 dB) and rate |
+| `test_rans_tdm.py` | TDM rANS: adaptive tables, unused-channel flush, count cap, extreme tables, rate vs entropy, corrupt-packet detection, static tables |
+| `test_spikes.py` | modes 2/3: high-pass, refractory, binned/SBP round trips, saturation |
+| `test_packet_data.py` | packet header and seq wrap, wrong-mode rejection, WAV -> 10-bit code mapping, dataset loader, energy break-even |
+
+### 2.2 RTL (cocotb 2.1, Icarus, bit-exact against the golden model)
+| suite | DUT | tests | checks |
+|---|---|---|---|
+| `test/lossy` | `nlc_lossy` (wavelet, FIFO, rANS, serialiser) | `adjacent_slots_short_frames` (8 channels back to back, 64-slot frames, output stalls 20%), `spread_slots_256` (8 of 256 slots, one slot per clock), `power_window` (1 packet at the operating point) | bytes == model, **then decoded** by the model; FIFO `overflow` = 0; prints bits/sample and SNR. Real challenge data (files 300+, not in ROM training) or synthetic if `data/raw` is absent |
+| `test/rans` | `rans_tdm_static`, `rans_tdm_adaptive` (`src/robs_rANS`) | static: reset table, loaded tables + reload, full-rate II=1, writes ignored while packet open; adaptive: random gaps + backpressure, full-rate II=1 | bytes == model, decoded |
+| `test/` (TT top) | `tt_um_nlc_compressor` through the pins | `test_plumbing`: config registers, slot selector; `test_modes`: lossless, binned, **lossy**, sbp, lossless_host_never_waits | bytes == vectors from `scripts/gen_vectors.py` (4 channels in a 16-slot frame, 10 clocks per slot) |
+| `test/` with `ENCODER=replay` | TT top with `test/mock/nlc_encoder_replay.v` | same 7 | harness self-test: pins, config, slot selector, FIFO with the golden bytes replayed |
+| `test/core` | `nlc_core` (slot selector, encoder, output FIFO, config) at the real interface: 256 slots, one per clock, 200 ns | T-IF-1/2/3, T-BW-1/2, T-OVF-1/2/3, T-ROB-1..6 (42 cases; T-ROB-1 needs `NLC_LONG=1`) | environment `test/env/nlc_env.py` (4.1): ADC mux, config port, host model, scoreboard by seq, monitors for latency/bandwidth/coverage; one JSON per test in `$NLC_RESULTS` |
+
+The TT-top suite now runs at 200 ns (D2), one slot every 2 clocks, 32-slot frames (64 clocks,
+C-IF-9); modes 0/2/3 skip with reason D1 except under `ENCODER=replay`. `make GATES=local
+NETLIST=reports/latest/top_netlist.v` runs it on our Yosys netlist (T-GL-2). `test/lossy` adds the
+power scenarios of 4.4 (`test_power_op/n4/worst/floor`), `gl_dump.v` takes `+vcd_start=<ns>`.
+
+### 2.3 Gate level, implementation (`scripts/check.py`)
+| step | what |
+|---|---|
+| `lint` | Verilator `-Wall` on the lossy core (strict) and the TT top (errors only) |
+| `synth` | Yosys -> sky130_fd_sc_hd (tt), flat netlists of `nlc_lossy` and the TT top, area, flop count, per-module area |
+| `sta` | OpenSTA 3.1, setup at ss (100 C, 1.60 V) for the TT clock and 200 ns, hold at ff; ideal clock, no wires |
+| `gl` | `test/lossy` `power_window` on the lossy netlist with sky130 cell models: at 200 ns (dumps VCD) and at the TT clock |
+| `power` | VCD -> per-pin activity sampled per clock (`scripts/flow/vcd_activity.py`) -> OpenSTA `report_power` at 5 MHz; also with glitches and idle (clock only) |
+| `compress` | golden model over 160 held-out challenge files (32-191): bits/sample, median SNR |
+
+## 3. Results log
+
+| date | run | result |
+|---|---|---|
+| 2026-10-06 | model | 47/47 pass |
+| 2026-10-06 | `test/lossy` RTL (first version) | failed at byte 139: last-sample mirror used the stored odd register; fixed (`nlc_lift53`), then bit-exact |
+| 2026-10-07 | `test/rans`, `test/lossy`, `test/` after port to cocotb 2.1 | pass (TT top: plumbing 2/2, lossy 1/1; lossless/binned/sbp fail: encoder stub, expected) |
+| 2026-10-07 | `test/` `ENCODER=replay` | 7/7 |
+| 2026-10-07 | gate-level lossy | **failed: 7,033 bytes instead of 670.** Yosys and Icarus disagreed on signed casts/function arguments; fixed with explicit bit slices; pre-mapping netlist and sky130 netlist now bit-exact |
+| 2026-10-07 | power tooling | Debian OpenSTA 2.0.17 reported 0 internal power (even one clocked flop); replaced by OpenSTA 3.1 built from source. `read_vcd` only annotated 34 pins (needs cell-level VCD); replaced by `vcd_activity.py` (100% of 10,601 pins) |
+| 2026-10-07 | full `check.py` (`reports/20261007-004244`) + compression rerun | see [results.md](results.md) |
+| 2026-10-07 | `test/core` (42 cases, 25 min, `nlc_core` at 256 slots, 1 slot/clock, 200 ns) | 31 pass, 10 fail, 1 skip. All failures are findings F2-F4 ([results.md](results.md)) |
+| 2026-10-07 | TT top at 200 ns, 1 slot / 2 clocks, 64-clock frames (T-IF-4); same on the Yosys TT-top netlist (T-GL-2) | pass; pass (277 s) |
+| 2026-10-07 | `test/lossy` power scenarios in RTL; `op` at gate level (2 packets from frame 64) | pass; 628.6 uW (unchanged: still 98% flop clock pins) |
+
+Findings F1-F9, budgets and the measured data: [results.md](results.md).
+
+## 4. Verification plan (testing phase)
+
+Every test checks one or more constraints in `docs/constraints.md` (IDs `C-*`). Scope is set
+by the decisions there: lossy mode only, 5 MHz with one slot per clock, packet-granular
+overflow, Neuralink-derived power. This phase builds **tests, environment models and
+measurement**. It does not build compressor RTL. The only RTL allowed is test peripherals
+(the on-chip stimulus generator, section 4.2).
+
+Status: `exists` = in the repo and passing, `extend` = exists but must change, `new`.
+
+### 4.1 Test environment (simulation of the platform around the chip)
+
+One reusable Python environment (`test/env/`, new), shared by every RTL and gate-level test,
+so that each test only picks a scenario:
+
+| component | models | knobs | status |
+|---|---|---|---|
+| **ADC mux driver** | the 256-slot stream at one slot per clock, `s_frame` on slot 0, never waits (C-IF-1..3) | `n_slots` (256; short frames for robustness only), data source per slot, frame-length faults (C-IF-8) | extend `test/harness.py` (`SLOT_CYCLES` -> 1, frame 256) |
+| **Data sources** | challenge recordings (held-out files 300+), synthetic, generator patterns (4.2), edge patterns: all 0, all 1023, DC + step, full-scale square at Nyquist (largest wavelet details), single-channel spikes | per-channel source, seed | extend `model/nlc/data.py` |
+| **Pin-path driver** | the slow real-data path through the pins with the `src/project.v` strobe protocol (C-IF-9) | clocks per slot (>= 2), slots per frame, frame >= 64 clocks | exists (harness), extend |
+| **Host model** | RP2040-like reader on the `m_ack` protocol: turnaround in clocks per byte (fixed, random, bursty), pauses of N clocks, "stops acking" (C-OVF-*) | turnaround distribution, stall schedule, seed | extend `read_bytes` |
+| **Config driver** | register writes; legal sequences and illegal ones (write while enabled, non-ascending slots) | | exists, extend |
+| **Scoreboard** | splits the byte stream into packets on `m_last`, checks header/seq, compares each packet with `LossyCodec` for its frames (by seq, so lost packets are allowed when the test expects them), decodes, computes SNR and bits/sample | expected-loss mode for T-OVF | new (logic exists inside `test/lossy/test_lossy.py`) |
+| **Monitors** | per-sample timestamps (slot in, symbol into coder, packet's last byte out) for latency; bytes per frame and output FIFO occupancy for bandwidth; coverage counters (4.5) | | new |
+| **Reports** | each test writes a JSON of measured values (latency, bandwidth, coverage) that `scripts/flow/flow.py` collects into `reports/latest/metrics.json` and scores against budgets | | new |
+
+System-model twin: the same chain without RTL (data source -> `LossyCodec` -> host model
+as a byte-rate queue -> decoder) in pure Python (`model/nlc/system.py`, new). It runs hours of
+data in seconds and finds worst-case packets for bandwidth and FIFO occupancy. Those packets
+are then replayed in RTL (model-guided worst cases).
+
+### 4.2 Stimulus peripheral (on-chip 256-slot generator, TT build only)
+
+Purpose: the TT pins and the RP2040 cannot feed 4.94 MS/s for long (platform.md 4.4). The
+peripheral produces the real interface on chip. It is test equipment, not part of the
+compressor, and its area and power are reported separately.
+
+| item | requirement |
+|---|---|
+| G-1 | Drives `nlc_core`'s ADC port in place of the pins: one slot per clock, 256 slots, `s_frame` on slot 0 |
+| G-2 | Patterns: **ramp** (sample = f(slot, frame), trivially checkable), **LFSR** noise (worst case: escapes, maximum output rate), **constant** (minimum activity, for the power floor) |
+| G-3 | Deterministic from reset/seed; a Python model (`model/nlc/stimgen.py`) reproduces the exact stream |
+| G-4 | Selected via one config register (address and fields fixed when it is built; must not collide with `nlc_regs.vh`) |
+| G-5 | Pin path still works when the generator is off |
+
+Tests: T-GEN-1 (generator RTL == its model, sample for sample), T-GEN-2 (compressor output with
+each pattern == `LossyCodec` on the model stream, through the TT top).
+
+### 4.3 Test list
+
+**Algorithm (golden model, pytest / scripts; fast, no RTL)**
+
+| ID | test | pass | covers | status |
+|---|---|---|---|---|
+| T-ALG-1 | Model invariants: lifting perfect reconstruction, streaming == block, coefficient order, FIFO peak 7 / lag 6, rANS round trip, escapes | as today | C-FN-1 | exists (47 tests) |
+| T-ALG-2 | Rate/quality regression over **all 743 files** (held-out set separate from ROM training): bits/sample, median and 10th-pct SNR, per-file table, worst 10 files listed | C-ALG-1..3 | C-ALG-1..3, C-BW-1 | extend (`compress` step runs 160 files) |
+| T-ALG-3 | Table generalisation: rate on training files vs held-out files; table regeneration (`gen_lossy_rom.py`) is deterministic and equals the committed ROM | C-ALG-4; ROM byte-identical | C-ALG-4 | new |
+| T-ALG-4 | Packet independence: decode packet k alone (no earlier packets) == decoding in sequence | exact | C-FN-3 | new |
+| T-ALG-5 | Spike fidelity: threshold crossings (the model's detector, `model/nlc/spikes.py`) on original vs reconstruction: hit rate, false positives, timing jitter | report, then set a limit | C-ALG-5 | new |
+| T-ALG-6 | Input edge cases in the model: all-0, all-1023, Nyquist square, DC steps, saturating data: round trip, escape counts, bytes per packet | decodes; max bytes recorded | C-BW-2 | new |
+| T-ALG-7 | Error bound: max abs reconstruction error, overall and per subband, over the full dataset, recorded as a baseline (any increase = regression) | <= baseline | C-FN-2 | new |
+
+**Algorithm change guard (run on every edit to `model/nlc/lossy.py`, `rans_tdm.py`, the ROM tables or the lossy RTL)**
+
+Purpose: you will keep changing the compression algorithm (shifts, block length, levels,
+tables, s_max, escape format, ...). These tests answer "does it still work?" with
+**properties, not frozen bytes**. Any legal algorithm change passes them, and a broken one
+fails. The tests read every parameter from `LossyConfig` and never hard-code today's values.
+
+| ID | test | pass | covers | status |
+|---|---|---|---|---|
+| T-CHG-1 | **Round trip, all data**: encode -> decode for every data source (real, synthetic, edge patterns, LFSR) and several `LossyConfig` variants (block 32/64/128, levels 1-4, other shifts, s_max); `hypothesis` property test on random inputs | decodes; error within the bound the quantiser shifts allow; exact when all shifts = 0 | C-FN-2 | new |
+| T-CHG-2 | **Hardware assumptions still hold** for the edited config: FIFO peak (`fifo_profile`) <= RTL depth 8, lag <= 1 frame; packet flush cycles <= frame length (C-IF-9 formula); coefficient/symbol widths fit the RTL fields (QW 13 bits, state 22 bits); table frequencies sum to M and fit the ROM width | all true, or a message naming the RTL parameter that must change | C-FN-1, C-IF-9 | new |
+| T-CHG-3 | **Quality/rate gate**: T-ALG-2 on a fixed 32-file subset (fast), then the full held-out set in T2 | C-ALG-1/2 limits; WARN if > 2% worse than the baseline | C-ALG-1..3 | new (wraps the `compress` step) |
+| T-CHG-4 | **Streaming == block reference**: the streaming production-order encoder (what the RTL does) == the block transform for the edited config | identical coefficients | C-FN-1 | exists in `test_lossy.py`, parametrise over configs |
+| T-CHG-5 | **Model <-> RTL constant sync**: every `LossyConfig` field the RTL hard-codes (`nlc_lossy.sv` localparams, `nlc_rans.sv` parameters, `nlc_lossy_rom.v` contents) is parsed from the sources and compared with the model; ROM regenerated from `lossy_tables.json` equals the committed ROM | equal; on mismatch, list the fields | C-FN-1 | new (pattern exists: `regs.check_hw_constants`) |
+| T-CHG-6 | **Model <-> RTL bit-exactness** after any edit: `test/lossy` + T-IF-1 regenerate expected bytes from the *current* model, so they follow the algorithm automatically | bit-exact | C-FN-1, C-FN-5 | exists, keep it model-driven |
+| T-CHG-7 | **Format change detector**: a small committed golden file (bytes of 2 packets of fixed data + a hash of the tables). If the model's output changes, the test fails with "bitstream changed: if intended, run `python scripts/gen_vectors.py --accept`", so format changes are always deliberate and recorded in section 3 | unchanged, or accepted explicitly | C-FN-4 | new |
+| T-CHG-8 | **Cost re-measure** (T2): after an accepted algorithm change, the flow reruns area, STA and power and compares with the baseline, so the silicon cost of the change is visible | WARN > 10% worse than baseline | C-AREA-*, C-PWR-* | exists (`check.py` baseline), document the use |
+
+Workflow for an algorithm edit: `pytest -k chg` (T-CHG-1..5, 7; < 1 min) -> `check.py
+--only rtl` (T-CHG-6) -> `check.py` (T-CHG-3 full, T-CHG-8). If T-CHG-2 or T-CHG-5 fails, the
+edit needs a matching RTL change before T-CHG-6 can pass. That RTL change is design work and
+happens later; the test only tells you which parameter is affected.
+
+**Interface (RTL, `nlc_core` and TT top, cocotb)**
+
+| ID | test | pass | covers | status |
+|---|---|---|---|---|
+| T-IF-1 | `nlc_core` at the real interface: 256 slots, one per clock, n_sel = 8, real data, >= 4 packets | bit-exact, 0 lost samples | C-IF-1..3, C-FN-1/2 | exists, pass |
+| T-IF-2 | Slot selection sweep: n_sel 1..8; slots {0}, {255}, {0..7}, {248..255}, spread, random ascending sets (seeded) | bit-exact for each | C-IF-4 | exists, pass (11 slot sets) |
+| T-IF-3 | Start-up: enable mid-frame -> first packet starts at the next `s_frame`, seq 0; enable -> disable -> enable == fresh run | bit-exact, seq 0 | C-IF-5/6 | exists: mid-frame enable pass; re-enable **fails (F2)** |
+| T-IF-4 | TT top through the pins at 5 MHz: config, pin path (C-IF-9), host model reading with the ack protocol | bit-exact | C-IF-9/10 | exists, pass (`test_modes.test_lossy` at 200 ns) |
+| T-IF-5 | TT top with the generator (T-GEN-2) at full rate | bit-exact | C-IF-1, G-* | new |
+
+**Overflow (decision D3)**
+
+| ID | test | pass | covers | status |
+|---|---|---|---|---|
+| T-OVF-1 | Host stops acking for a whole packet, then resumes | each received packet is either bit-exact or identifiable as damaged from the pins; the seq gap matches the lost packets | C-OVF-1/2 | exists, **fails (F3)**, known-fail |
+| T-OVF-2 | Same, several stall lengths (1 byte .. 3 packets) and stall start points (header, mid-payload, during flush) | first packet that starts after resume is intact; all later packets bit-exact | C-OVF-3/4, C-FN-3 | exists, **fails (F3)** except a 300-clock stall |
+| T-OVF-3 | Today's behaviour, recorded as the "before" point: byte drop + sticky flag | documents the gap to C-OVF-1 | exists (records F3) |
+
+**Latency and bandwidth (measured by monitors, scored by the flow)**
+
+| ID | test | pass | covers | status |
+|---|---|---|---|---|
+| T-LAT-1 | Timestamp every sample: slot -> coder input, slot -> last byte of its packet; report min/median/max | C-LAT-1/2 limits | C-LAT-1..3 | exists (T-IF-1 monitors) |
+| T-BW-1 | Bytes per frame and per packet (histogram), output FIFO peak occupancy, flush burst length; real, LFSR and edge-pattern data plus model-guided worst packets (4.1) | report; worst case feeds C-BW-3 | C-BW-1/2 | exists, pass |
+| T-BW-2 | Host turnaround sweep (clocks per byte) on worst-case data: find the slowest host with 0 overflow, then verify that host for >= 16 packets | value recorded as the published host requirement | C-BW-3, C-OVF-5 | exists, pass: **11 clocks/byte** |
+
+**Robustness**
+
+| ID | test | pass | covers | status |
+|---|---|---|---|---|
+| T-ROB-1 | Long run: >= 70 packets (seq wraps past 63) with the generator, RTL | bit-exact, seq wraps | C-FN-4 | exists (`NLC_LONG=1`), not run yet |
+| T-ROB-2 | Reset and disable at random points (mid-frame, mid-packet, during flush, during host stall); next run == fresh run | bit-exact, no hang | C-IF-6 | exists, **fails (F2)** |
+| T-ROB-3 | Config written while enabled (illegal), then disable/enable | no hang; correct afterwards | C-IF-7 | exists, **fails (F2)** |
+| T-ROB-4 | Frame-length faults: early/late/missing `s_frame`, then regular frames | no hang; correct within one packet | C-IF-8 | exists: long/missing pass, short **fails (F4)** |
+| T-ROB-5 | Power-up state: Verilator 2-state with random register init (several seeds) and Icarus/GL with X-init; output identical | identical bytes for all seeds; no X on outputs after the first frame | C-FN-6 | exists, pass (random deposit, 234 regs, 3 seeds) |
+| T-ROB-6 | Random regression: N seeded runs mixing data source, n_sel, slots, host model and stalls (nightly) | 0 failures; failing seed reproducible | all C-FN, C-IF | exists, pass (4 seeds) |
+
+**Gate level, equivalence, implementation**
+
+| ID | test | pass | covers | status |
+|---|---|---|---|---|
+| T-LINT-1 | Verilator lint: lossy core `-Wall`, TT top errors | 0 errors | C-RTL-1 | exists |
+| T-GL-1 | Lossy core netlist (sky130 cells) runs `test/lossy` at 200 ns | bit-exact | C-FN-5, C-RTL-2 | exists |
+| T-GL-2 | **TT top** netlist (like TT's `gl_test`) runs T-IF-4 and T-IF-5 | bit-exact | C-FN-5, C-TIM-4 | exists, pass (Yosys netlist, `GATES=local`) |
+| T-GL-3 | Post-layout gate-level with SDF from the TT GDS action | bit-exact | C-FN-5, C-TIM-1 | new (after first GDS run) |
+| T-EQ-1 | RTL vs netlist equivalence (Yosys `equiv_*` or SymbiYosys) as a fast check next to T-GL-1 | proven equivalent | C-FN-5, C-RTL-2 | new |
+| T-FV-1 | Formal properties on the plumbing (SymbiYosys): out FIFO keeps order and never loses data when not full; slot selector emits each configured slot exactly once per frame, in order | proven (bounded) | C-IF-2/4 | new |
+| T-STA-1 | OpenSTA: setup at ss, 200 ns; hold at ff; report Fmax at ss | C-TIM-1/2 | C-TIM-1/2/5 | extend (TT clock -> 200 ns) |
+| T-AREA-1 | Yosys area: lossy core, TT top, per module, flops; generator reported separately | C-AREA-1..3 | C-AREA-1..3 | extend (generator split) |
+| T-AREA-2 | Area vs N_SEL sweep (1, 2, 4, 8): fixed cost and per-channel slope; state bits per channel | report | C-AREA-4 | exists (`area` step, N_SEL 2/4/8/16), not run yet |
+| T-PWR-1 | Power matrix at 5 MHz, tt corner (4.4) | C-PWR-1..5 | C-PWR-* | extended: scenarios op/n4/worst/floor + idle; op measured |
+| T-SO-1 | TT GDS action: utilisation, setup/hold after CTS, precheck/DRC/LVS/antenna | C-TIM-2/3, C-AREA-3/5 | | new (after push) |
+| T-INF-1 | CI: GitHub `test` (TT) and `ci` (model, RTL) workflows green | green | extended (`model.yml`: TT top + core T-IF); not pushed yet |
+| T-INF-2 | Source-list consistency: `info.yaml`, `test/Makefile`, `LOSSY_SRC` list the same files | identical sets | C-RTL-3 | new |
+
+### 4.4 Power and area measurement method
+
+T-PWR-1 scenarios. Each is a gate-level run of the lossy netlist at 200 ns, then per-clock
+activity, then OpenSTA `report_power` (method as in section 2.3):
+
+| scenario | data | n_sel | window | limit |
+|---|---|---|---|---|
+| op | real held-out data | 8 | >= 2 packets, steady state (skip the first packet's start-up) | C-PWR-1 |
+| op4 | real data | 4 | 2 packets | C-PWR-3 |
+| worst | LFSR generator | 8 | 2 packets | C-PWR-5 |
+| floor | constant generator | 8 | 1 packet | info |
+| idle | `enable` = 0, clock running | | 1 packet length | C-PWR-2 |
+
+Rules: the window must be long enough that power per packet changes by < 5% between packets
+(checked and reported). Report a breakdown: flop clock pins, sequential internal,
+combinational, ROM, leakage, plus glitch-inclusive totals (`op_with_glitches`). Report
+energy per sample, power density, and the radio ratio (marked "assumes 10 nJ/bit, unsourced").
+Corners: tt for the budget, ss/ff reported. After the first GDS run, repeat `op` with the
+routed netlist and SPEF parasitics (clock tree included). That number is the sign-off value
+for C-PWR-1.
+
+Area: pre-layout Yosys cell area at tt is the working number (T-AREA-1/2). The GDS action's
+utilisation and placement density are the sign-off (T-SO-1).
+
+### 4.5 Functional coverage (collected by the monitors, reported per run)
+
+Must be hit across the regression (T-ROB-6 plus the directed tests), otherwise the run WARNs:
+
+- escapes in each context 0..3; consecutive escapes; an escape as the last symbol of a packet;
+- every symbol value 0..63 in each context (or listed as unreachable);
+- per-channel FIFO occupancy 0..7; the peak of 7 actually reached;
+- rANS hazard stall (`s_tready` low) and back-to-back same-channel symbols;
+- coder output of 0, 1, 2, 3, 4 bytes in one word;
+- packet flush overlapping new samples of the next packet;
+- output FIFO full; host stall starting at header, payload and flush;
+- n_sel = 1..8; slot 0 and slot 255 selected; adjacent selected slots;
+- seq wrap 63 -> 0; enable dropped at each phase (frame, block, packet, flush).
+
+### 4.6 Regression tiers and CI
+
+| tier | when | contents | time budget |
+|---|---|---|---|
+| T0 quick | before every commit | `pytest` (incl. T-CHG-1..5, 7), lint, `test/lossy`, `test/` plumbing + lossy (`check.py --only model,lint,rtl --quick`) | < 3 min |
+| T1 CI | every push (GitHub `.github/workflows/model.yml` + TT `test.yaml`) | T0 + rANS suites + replay self-test + T-IF-* + T-INF-2 | < 15 min |
+| T2 full | before a design change is accepted; nightly while iterating | `python scripts/check.py`: everything above + GL + STA + area + power matrix + compression on held-out files + random regression (T-ROB-6, 50 seeds) | < 1 h |
+| T3 sign-off | per GDS run | TT `gds`, `gl_test`, precheck; T-GL-3, post-layout power | TT action |
+
+CI rules: modes 0/2/3 TT-top tests are **skipped with reason** "not in silicon (D1)", not
+deleted and not failing. A WARN never fails CI; a FAIL does. Every failing randomised test
+prints its seed and a one-line command that reproduces it.
+
+### 4.7 Order of work
+
+1. **Environment** (4.1) and the **algorithm change guard** (T-CHG-*): extend the harness to 1 slot/clock and 256-slot frames, add the
+   scoreboard, host model and monitors; system-model twin.
+2. **Interface + robustness** tests that run on today's RTL: T-IF-1..4, T-ROB-1..5, T-FV-1,
+   T-INF-2. They either pass or find bugs (record them in section 3).
+3. **Measurement**: T-LAT-1, T-BW-1/2, power matrix, area sweep, T-ALG-2..7. This turns the
+   "measure" entries of `docs/constraints.md` into numbers and fills in C-BW-3.
+4. **Peripheral**: generator + model (4.2), T-GEN-1/2, T-IF-5, T-GL-2.
+5. **Overflow tests** T-OVF-1..3 (T-OVF-1/2 are expected to fail on today's RTL; that is the
+   input to the design phase).
+6. Restore the TT template files, push, first GDS run -> T-SO-1, T-GL-3, post-layout power.
+
+The testing phase is done when every constraint in `docs/constraints.md` has a test that
+measures it, the T2 report shows a value for every budget, and the known failures (power,
+overflow policy) are reproducible by a named test.
+
+### 4.8 Traceability (constraint -> tests)
+
+| constraints | tests |
+|---|---|
+| C-IF-1..3 | T-IF-1, T-IF-5, T-FV-1 |
+| C-IF-4 | T-IF-2, T-FV-1 |
+| C-IF-5..8 | T-IF-3, T-ROB-2..4 |
+| C-IF-9/10 | T-IF-4 |
+| C-FN-1/2 | T-ALG-1, T-CHG-1..7, T-IF-*, T-GL-*, T-ROB-6 |
+| C-FN-3 | T-ALG-4, T-OVF-2 |
+| C-FN-4 | T-ROB-1 |
+| C-FN-5 | T-GL-1..3, T-EQ-1 |
+| C-FN-6 | T-ROB-5 |
+| C-OVF-1..5 | T-OVF-1..3, T-BW-2 |
+| C-LAT-* | T-LAT-1 |
+| C-BW-* | T-BW-1/2, T-ALG-6 |
+| C-TIM-* | T-STA-1, T-GL-2/3, T-SO-1 |
+| C-AREA-* | T-AREA-1/2, T-SO-1 |
+| C-PWR-* | T-PWR-1 (4.4) |
+| C-ALG-* | T-ALG-2/3/5, T-CHG-3 |
+| C-RTL-* | T-LINT-1, T-GL-1, T-EQ-1, T-INF-2 |

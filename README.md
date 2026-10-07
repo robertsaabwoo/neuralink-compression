@@ -1,42 +1,71 @@
-![](../../workflows/gds/badge.svg) ![](../../workflows/docs/badge.svg) ![](../../workflows/test/badge.svg) ![](../../workflows/fpga/badge.svg)
+# neuralink-compression
 
-# Tiny Tapeout Verilog Project Template
+Lossy neural-data compression for a Tiny Tapeout chip (sky130): a LeGall 5/3 integer wavelet,
+quantisation and static rANS on 8 channels picked from a 256-slot, 10-bit ADC stream at 5 MHz.
+The goal is to measure what this costs in silicon (area, power, timing), not to win on
+compression ratio.
 
-- [Read the documentation for project](docs/info.md)
+## Status
 
-## What is Tiny Tapeout?
+**Testing phase.** The RTL works and matches the Python model bit for bit. Now we are building
+the test environment and measuring the design against Neuralink-derived requirements. Design
+fixes come after that.
 
-Tiny Tapeout is an educational project that aims to make it easier and cheaper than ever to get your digital and analog designs manufactured on a real chip.
+| | result | |
+|---|---|---|
+| compression | 2.09 bits/sample, 18.0 dB median SNR | pass |
+| area | 128,000 um^2, 48% of an 8x2 TT design | over the 4x2 target |
+| timing | +138 ns slack at 200 ns (slow corner) | pass |
+| power | 629 uW, 98% of it flip-flop clock pins | **far over the 40 uW budget** |
+| tests | 31 of 42 interface/robustness cases pass | 10 fail on purpose: open design issues |
 
-To learn more and get started, visit https://tinytapeout.com.
+Open design issues found by the tests (detail in [docs/results.md](docs/results.md)):
+- processing latency is 2.0 ms against a 1 ms target (wavelet look-ahead);
+- disabling mid-packet, a host stall, or one short ADC frame corrupts the output stream;
+- a worst-case host must read a byte at least every 11 clocks (2.2 us).
 
-## Set up your Verilog project
+## Run it
 
-1. Add your Verilog files to the `src` folder.
-2. Edit the [info.yaml](info.yaml) and update information about your project, paying special attention to the `source_files` and `top_module` properties. If you are upgrading an existing Tiny Tapeout project, check out our [online info.yaml migration tool](https://tinytapeout.github.io/tt-yaml-upgrade-tool/).
-3. Edit [docs/info.md](docs/info.md) and add a description of your project.
-4. Adapt the testbench to your design. See [test/README.md](test/README.md) for more information.
+All checks run in a Docker image (Icarus, cocotb 2.1, Yosys, OpenSTA, sky130 models):
 
-The GitHub action will automatically build the ASIC files using [LibreLane](https://www.zerotoasiccourse.com/terminology/librelane/).
+```
+python docker/fetch_inputs.py && docker build -t nlc-flow docker   # once
+python nlc.py sim        # model + RTL tests (~45 min, --quick for the interface tests only)
+python nlc.py algo       # compression quality on the challenge data
+python nlc.py synth      # area;  also: sta, gate_sim, power
+python nlc.py all        # everything, scored against the budgets (~1.5 h)
+python nlc.py report     # last summary
+python scripts/status.py # where things stand (1 s)
+pytest                   # golden model only, no Docker (30 s)
+```
 
-## Enable GitHub actions to build the results page
+Results land in `reports/latest/summary.md`.
 
-- [Enabling GitHub Pages](https://tinytapeout.com/faq/#my-github-action-is-failing-on-the-pages-part)
+## Docs
 
-## Resources
+| doc | what |
+|---|---|
+| [docs/platform.md](docs/platform.md) | the environment the chip lives in: Neuralink's architecture, Tiny Tapeout limits |
+| [docs/constraints.md](docs/constraints.md) | requirements (C-*) and scope decisions D1-D4 |
+| [docs/testing.md](docs/testing.md) | how to run, test inventory, verification plan (T-*) |
+| [docs/results.md](docs/results.md) | findings, budgets, measured data |
+| [docs/budgets.md](docs/budgets.md) | where each pass/fail number comes from |
+| [HANDOFF.md](HANDOFF.md) | working notes: current state and next steps |
 
-- [FAQ](https://tinytapeout.com/faq/)
-- [Digital design lessons](https://tinytapeout.com/digital_design/)
-- [Learn how semiconductors work](https://tinytapeout.com/siliwiz/)
-- [Join the community](https://tinytapeout.com/discord)
-- [Build your design locally](https://www.tinytapeout.com/guides/local-hardening/)
+## Layout
 
-## What next?
+```
+model/nlc/     golden model: the bit-exact spec (format in the module docstrings)
+model/tests/   pytest, incl. the algorithm change guard
+src/           RTL: project.v (TT pins) -> nlc_core -> slot_sel / nlc_lossy / out_fifo
+test/env/      shared test environment (ADC stream, host, scoreboard, monitors)
+test/core/     nlc_core at the real 256-slot interface
+test/lossy/    lossy core + power scenarios;  test/rans/: rANS coder;  test/: TT top
+scripts/flow/  check flow and budgets
+```
 
-- [Submit your design to the next shuttle](https://app.tinytapeout.com/).
-- Edit [this README](README.md) and explain your design, how it works, and how to test it.
-- Share your project on your social network of choice:
-  - LinkedIn [#tinytapeout](https://www.linkedin.com/search/results/content/?keywords=%23tinytapeout) [@TinyTapeout](https://www.linkedin.com/company/100708654/)
-  - Mastodon [#tinytapeout](https://chaos.social/tags/tinytapeout) [@matthewvenn](https://chaos.social/@matthewvenn)
-  - X (formerly Twitter) [#tinytapeout](https://twitter.com/hashtag/tinytapeout) [@tinytapeout](https://twitter.com/tinytapeout)
-  - Bluesky [@tinytapeout.com](https://bsky.app/profile/tinytapeout.com)
+## Attribution
+
+Inspired by Neuralink's patents (US 2021/0012909 A1, US 12,369,863 B2) and the public Neuralink
+compression challenge, whose recordings are the test data. An independent learning project using
+standard public techniques; **not affiliated with or endorsed by Neuralink**.

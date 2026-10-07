@@ -1,0 +1,163 @@
+{
+  "_doc": [
+    "Budgets for scripts/flow/flow.py. Each metric: limit (FAIL past it), target (WARN past it,",
+    "PASS within), cmp ('<=' or '>='), unit, why. 'baseline' is the last known-good measurement",
+    "(python scripts/check.py --update-baseline); a metric that is >10% worse than baseline WARNs",
+    "even when it is inside the target. Rationale and sources: docs/budgets.md.",
+    "Operating point: 8 channels selected from a 256-slot ADC mux at 19.53 kHz/slot, clock = slot",
+    "rate = 5 MHz (200 ns), sky130_fd_sc_hd. TT's own GDS flow (LibreLane) is the sign-off for area",
+    "and timing; these are pre-layout estimates."
+  ],
+  "operating_point": {
+    "n_channels": 8,
+    "sample_rate_hz": 19531,
+    "clock_period_ns": 200,
+    "tt_clock_period_ns": 200,
+    "radio_nj_per_bit": 10.0,
+    "tt_tile_um2": 18036,
+    "tt_density": 0.6
+  },
+  "metrics": {
+    "lint_errors": {
+      "limit": 0,
+      "target": 0,
+      "cmp": "<=",
+      "unit": "",
+      "why": "TT's flow runs Verilator lint; errors stop the GDS build"
+    },
+    "tests_failed": {
+      "limit": 0,
+      "target": 0,
+      "cmp": "<=",
+      "unit": "",
+      "why": "model, lossy RTL, rANS RTL, TT top (implemented modes), lossy gate-level"
+    },
+    "lossy_cell_area_um2": {
+      "limit": 173000,
+      "target": 86600,
+      "cmp": "<=",
+      "unit": "um^2",
+      "why": "limit: fits TT 8x2 (16 tiles x 18,036 um^2 x 60% density); target: 4x2 (8 tiles), = 0.011 mm^2/channel"
+    },
+    "lossy_area_per_ch_mm2": {
+      "limit": 0.03,
+      "target": 0.01,
+      "cmp": "<=",
+      "unit": "mm^2/ch",
+      "why": "published neural compression ASICs: 0.004-0.03 mm^2/ch at 130-180 nm (docs/budgets.md)"
+    },
+    "top_utilisation": {
+      "limit": 0.7,
+      "target": 0.6,
+      "cmp": "<=",
+      "unit": "",
+      "why": "whole TT design cell area / tiles in info.yaml; TT's default PL_TARGET_DENSITY_PCT is 60, users report up to ~80"
+    },
+    "setup_slack_ss_tt_clk_ns": {
+      "limit": 0.0,
+      "target": 60.0,
+      "cmp": ">=",
+      "unit": "ns",
+      "why": "TT CLOCK_PERIOD (src/config.json; must be 200 ns, docs/constraints.md D2/C-TIM-3) at the slow corner (ss 100C 1.60 V); target keeps 30% of the period for wires and clock skew (pre-layout)"
+    },
+    "setup_slack_ss_op_clk_ns": {
+      "limit": 0.0,
+      "target": 60.0,
+      "cmp": ">=",
+      "unit": "ns",
+      "why": "operating clock 200 ns at the slow corner; target 30%"
+    },
+    "hold_slack_ff_ns": {
+      "limit": 0.0,
+      "target": 0.0,
+      "cmp": ">=",
+      "unit": "ns",
+      "why": "fast corner (ff -40C 1.95 V), ideal clock: real hold is fixed by CTS/resizer in TT's flow"
+    },
+    "lossy_power_uw": {
+      "limit": 40.0,
+      "target": 16.0,
+      "cmp": "<=",
+      "unit": "uW",
+      "why": "Neuralink-derived (docs/constraints.md D4, C-PWR-1): < 10 mW for 1024 ch incl. radio = ~9.8 uW/ch; compressor share limit 5 uW/ch, target 2 uW/ch, x 8 channels"
+    },
+    "power_idle_uw": {
+      "limit": 10.0,
+      "target": 2.0,
+      "cmp": "<=",
+      "unit": "uW",
+      "why": "C-PWR-2: enable = 0, clock running"
+    },
+    "power_worst_uw": {
+      "limit": 40.0,
+      "target": 40.0,
+      "cmp": "<=",
+      "unit": "uW",
+      "why": "C-PWR-5: LFSR (incompressible) data must stay inside the C-PWR-1 limit"
+    },
+    "lossy_power_density_mw_cm2": {
+      "limit": 40.0,
+      "target": 10.0,
+      "cmp": "<=",
+      "unit": "mW/cm^2",
+      "why": "AAMI implant limit ~40 mW/cm^2 (~2 C tissue heating); area = cell area / 60% density"
+    },
+    "radio_energy_ratio": {
+      "limit": 0.1,
+      "target": 0.01,
+      "cmp": "<=",
+      "unit": "",
+      "why": "compressor energy / radio energy it saves per sample (10 nJ/bit); must be << 1 to be worth it"
+    },
+    "bits_per_sample": {
+      "limit": 2.2,
+      "target": 2.1,
+      "cmp": "<=",
+      "unit": "bit",
+      "why": "160 held-out challenge files (32-191); 2.087 at design time (old software model 2.118)"
+    },
+    "snr_median_db": {
+      "limit": 17.0,
+      "target": 18.0,
+      "cmp": ">=",
+      "unit": "dB",
+      "why": "median per-channel SNR, 160 held-out files; 18.0 dB at design time (a 32-file --quick run reads ~1.4 dB lower: subset variance)"
+    },
+    "latency_processing_us": {
+      "limit": 1000.0,
+      "target": 410.0,
+      "cmp": "<=",
+      "unit": "us",
+      "why": "C-LAT-1: Neuralink challenge < 1 ms. Measured (T-IF-1 monitors) as sample slot -> the last coder symbol that depends on the sample (transform look-ahead + per-channel FIFO lag + coder entry). Queue-only latency (push -> coder) is in the details."
+    },
+    "latency_delivery_ms": {
+      "limit": 40.0,
+      "target": 20.0,
+      "cmp": "<=",
+      "unit": "ms",
+      "why": "C-LAT-2: sample slot -> last byte of its packet taken by the host; patent packet windows 10-40 ms"
+    },
+    "coverage_missing_bins": {
+      "limit": 1000,
+      "target": 0,
+      "cmp": "<=",
+      "unit": "bins",
+      "why": "docs/testing.md 4.5: functional coverage bins not hit by the test/core regression (WARN only); list in the details"
+    }
+  },
+  "baseline": {
+    "bits_per_sample": 2.086721,
+    "snr_median_db": 18.002657,
+    "lint_errors": 0,
+    "lossy_cell_area_um2": 127976.4896,
+    "lossy_area_per_ch_mm2": 0.015997,
+    "top_utilisation": 0.483118,
+    "setup_slack_ss_tt_clk_ns": -41.926,
+    "setup_slack_ss_op_clk_ns": 138.074,
+    "hold_slack_ff_ns": 0.242,
+    "lossy_power_uw": 628.51,
+    "lossy_power_density_mw_cm2": 294.668186,
+    "radio_energy_ratio": 0.050797,
+    "tests_failed": 0
+  }
+}
