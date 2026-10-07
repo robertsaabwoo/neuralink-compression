@@ -1,0 +1,36 @@
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  golden-model:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+      - run: python scripts/benchmark.py --synthetic --channels 8
+
+  rtl-sim:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y iverilog
+      - run: pip install -e ".[sim]"
+      - run: python scripts/gen_vectors.py --out test/vectors
+      # Harness self-test (replay mock, all modes), then the real design (modes 0/2/3 skip: D1)
+      - run: make -C test ENCODER=replay
+      - run: "! grep -q failure test/results.xml"
+      - run: make -C test
+      - run: "! grep -q failure test/results.xml"
+      - run: make -C test/rans TOP=static && ! grep -q failure test/rans/results.xml
+      - run: make -C test/rans TOP=adaptive && ! grep -q failure test/rans/results.xml
+      - run: make -C test/lossy && ! grep -q failure test/lossy/results.xml
+      # nlc_core at the real 256-slot interface: T-IF-* only (T1 tier; the rest is T2, check.py)
+      - run: make -C test/core COCOTB_TEST_FILTER=t_if_ && ! grep -q failure test/core/results.xml
