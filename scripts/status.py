@@ -56,7 +56,8 @@ def age(path: Path) -> str:
 
 def direction() -> None:
     head("direction (HANDOFF.md)")
-    text = (ROOT / "HANDOFF.md").read_text(encoding="utf-8")
+    path = ROOT / "HANDOFF.md"            # local working notes, not in git
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
     m = re.search(r"\*\*Current direction.*?(?=\n\n)", text, re.S)
     print(m.group(0) if m else "(no 'Current direction' paragraph in HANDOFF.md)")
     print("\nDetails: HANDOFF.md, docs/platform.md, docs/testing.md, docs/budgets.md")

@@ -50,7 +50,6 @@ Results land in `reports/latest/summary.md`.
 | [docs/testing.md](docs/testing.md) | how to run, test inventory, verification plan (T-*) |
 | [docs/results.md](docs/results.md) | findings, budgets, measured data |
 | [docs/budgets.md](docs/budgets.md) | where each pass/fail number comes from |
-| [HANDOFF.md](HANDOFF.md) | working notes: current state and next steps |
 
 ## Layout
 
