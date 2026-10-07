@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nlc"
+version = "0.1.0"
+description = "Golden model for a multi-mode neural data compression engine (Tiny Tapeout, sky130)"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+sim = ["cocotb==2.1.0"]
+plot = ["matplotlib>=3.7"]
+
+[tool.setuptools.packages.find]
+where = ["model"]
+
+[tool.pytest.ini_options]
+testpaths = ["model/tests"]
+pythonpath = ["model"]
+
+[tool.setuptools.package-data]
+nlc = ["*.json"]
