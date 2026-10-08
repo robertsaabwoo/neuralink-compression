@@ -740,7 +740,9 @@ def _slews(r: Run, net: Path, top: str, d: Path, corner: str) -> dict[str, float
     (r.out / f"layout_sta_{corner}.tcl").write_text(tcl)
     _, text = r.sh(f"{STA} {r.out / f'layout_sta_{corner}.tcl'}", f"layout_sta_{corner}.log")
     r.info.setdefault("layout_sta_ws", {})[corner] = {
-        k: num(rf"^nlc_ws {k}\s*\nworst slack (-?[\d.]+)", text) for k in ("setup", "hold")}
+        # OpenSTA: "worst slack 1.23"; OpenROAD: "worst slack max 1.23"
+        k: num(rf"^nlc_ws {k}\s*\nworst slack (?:max |min )?(-?[\d.]+)", text)
+        for k in ("setup", "hold")}
     slews = {}
     if out.exists():
         for line in out.read_text().splitlines():
@@ -817,7 +819,9 @@ def step_layout(r: Run, quick: bool = False) -> None:
     if preview:
         r.notes.append(f"layout: CTS PREVIEW ({src.get('last_step')}): placed, clock tree built, "
                        "not routed; wire parasitics estimated from placement, hold slack from "
-                       "our STA after post-CTS repair (routing adds hold buffers later)")
+                       "our STA after post-CTS repair (routing adds hold buffers later); slew counts are "
+                       "not comparable with a routed run (estimated wires, routing-stage repair to "
+                       "come)")
     r.info["layout_librelane"] = {
         "core_area_um2": core,
         "stdcell_area_um2": round(ll.get("design__instance__area__stdcell", 0)),
