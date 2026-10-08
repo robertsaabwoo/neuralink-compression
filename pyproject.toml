@@ -12,7 +12,7 @@ dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
-sim = ["cocotb==2.1.0"]
+sim = ["cocotb==2.1.0", "pytest>=7"]   # pytest: runtime skips
 plot = ["matplotlib>=3.7"]
 
 [tool.setuptools.packages.find]
