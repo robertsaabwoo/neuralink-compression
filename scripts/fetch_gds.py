@@ -74,13 +74,19 @@ def _copy_cts(base: Path, dest: Path) -> None:
                 shutil.copy(cts / f, dest / name)
 
 
+def routed(base: Path) -> bool:
+    """A complete flow has extracted parasitics; a run stopped with --to still writes final/
+    (views of its last step) but no SPEF."""
+    return (base / "final" / "spef" / "nom").is_dir()
+
+
 def pack(base: Path, dest: Path, meta: dict) -> dict:
     """Keep what the layout step needs from a LibreLane run directory (runs/wokwi)."""
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
     final = base / "final"
-    if (final / "nl").is_dir():                       # complete flow: routed and extracted
+    if routed(base):                                  # complete flow: routed and extracted
         top = next((final / "nl").glob("*.nl.v")).name.removesuffix(".nl.v")
         shutil.copy(final / "nl" / f"{top}.nl.v", dest / "nl.v")
         for c in ("nom", "min", "max"):
@@ -125,7 +131,7 @@ def main() -> None:
         meta = {"commit": sha, "run_id": int(rid) if rid else None,
                 "branch": os.environ.get("GITHUB_REF_NAME"),
                 "url": f"{server}/{rep}/actions/runs/{rid}" if rid else None}
-        dest = OUT / (sha[:7] + ("" if (args.pack / "final" / "nl").is_dir() else "-cts"))
+        dest = OUT / (sha[:7] + ("" if routed(args.pack) else "-cts"))
         src = pack(args.pack, dest, meta)
         (OUT / "LATEST").write_text(dest.name + "\n")
         print(f"packed {args.pack} ({src['kind']}) -> {dest}")
