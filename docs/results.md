@@ -6,7 +6,7 @@ corner, 5 MHz, 8 channels unless stated. Raw per-run output: `reports/latest/` (
 
 ## Findings (input to the design phase)
 
-F2-F4 now have decided fixes: D5-D7 in [constraints.md](constraints.md). The tests check those rules and pass once the RTL implements them.
+F2-F4 are fixed (2026-10-08): D5-D7 are implemented and their tests pass (T-OVF-1/2, T-IF-3b, T-ROB-2/3/4); `KNOWN_FAIL` is empty.
 
 The tests that expose F2-F4 stay as written and fail on today's RTL. `scripts/flow/flow.py`
 lists them in `KNOWN_FAIL`, so they are reported without failing the run.

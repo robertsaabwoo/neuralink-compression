@@ -25,6 +25,7 @@ module nlc_core #(
     output wire [7:0]           m_data,
     output wire                 m_valid,
     output wire                 m_last,
+    output wire                 m_abort,    // abort token (D6/D7): drop the partial packet
     input  wire                 m_ready,
     output wire                 overflow
 );
@@ -47,17 +48,20 @@ module nlc_core #(
   wire [SEL_W-1:0]    smp_ch;
   wire                smp_first;
   wire                smp_last;
+  wire                smp_tick;
+  wire                smp_short;
 
   nlc_slot_sel #(.ADC_BITS(ADC_BITS), .N_SEL(N_SEL)) u_sel (
       .clk(clk), .rst_n(rst_n), .enable(enable), .n_sel(n_sel), .sel_slots(sel_slots),
       .s_valid(s_valid), .s_frame(s_frame), .s_data(s_data),
       .smp_valid(smp_valid), .smp_data(smp_data), .smp_ch(smp_ch),
-      .smp_first(smp_first), .smp_last(smp_last)
+      .smp_first(smp_first), .smp_last(smp_last), .smp_tick(smp_tick), .smp_short(smp_short)
   );
 
   wire                wr_en;
   wire [7:0]          wr_data;
   wire                wr_last;
+  wire                wr_abort;
   wire                fifo_full;
   wire [FIFO_AW:0]    fifo_count;
 
@@ -65,16 +69,16 @@ module nlc_core #(
       .clk(clk), .rst_n(rst_n),
       .enable(enable), .n_sel(n_sel),
       .smp_valid(smp_valid), .smp_data(smp_data), .smp_ch(smp_ch),
-      .smp_first(smp_first), .smp_last(smp_last),
-      .wr_en(wr_en), .wr_data(wr_data), .wr_last(wr_last),
+      .smp_first(smp_first), .smp_last(smp_last), .smp_tick(smp_tick), .smp_short(smp_short),
+      .wr_en(wr_en), .wr_data(wr_data), .wr_last(wr_last), .wr_abort(wr_abort),
       .fifo_full(fifo_full), .fifo_count(fifo_count)
   );
 
   nlc_out_fifo #(.DEPTH(FIFO_DEPTH)) u_fifo (
       .clk(clk), .rst_n(rst_n),
-      .wr_en(wr_en), .wr_data(wr_data), .wr_last(wr_last),
+      .wr_en(wr_en), .wr_data(wr_data), .wr_last(wr_last), .wr_abort(wr_abort),
       .full(fifo_full), .count(fifo_count),
-      .m_valid(m_valid), .m_data(m_data), .m_last(m_last), .m_ready(m_ready),
+      .m_valid(m_valid), .m_data(m_data), .m_last(m_last), .m_abort(m_abort), .m_ready(m_ready),
       .overflow(overflow)
   );
 

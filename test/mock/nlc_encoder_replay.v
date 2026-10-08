@@ -20,9 +20,12 @@ module nlc_encoder #(
     input  wire [SEL_W-1:0]     smp_ch,
     input  wire                 smp_first,
     input  wire                 smp_last,
+    input  wire                 smp_tick,
+    input  wire                 smp_short,
     output wire                 wr_en,
     output wire [7:0]           wr_data,
     output wire                 wr_last,
+    output wire                 wr_abort,
     input  wire                 fifo_full,
     input  wire [FIFO_AW:0]     fifo_count
 );
@@ -50,5 +53,6 @@ module nlc_encoder #(
   assign wr_en   = started && !fifo_full && (cur[9] === 1'b0);
   assign wr_data = cur[7:0];
   assign wr_last = cur[8];
+  assign wr_abort = 1'b0;
 
 endmodule

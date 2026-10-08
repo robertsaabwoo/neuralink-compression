@@ -28,8 +28,8 @@ the model-only modes 0/2/3 were removed from the RTL (2026-10-08).
 
 **`nlc_slot_sel`.** Counts slots (restart on `s_frame`), emits the configured slots as channels
 0..n_sel-1 with first/last-of-frame flags, starting at the first `s_frame` after enable.
-*D5 lands here:* today a short frame loses channels and the encoder detects "frame done" from
-the last channel, which misaligns everything (F4).
+Frame rule (D5): `smp_tick` marks each new frame (from `s_frame`), `smp_short` flags that the
+frame before it did not reach all selected slots; the encoder then aborts the packet (D6 path).
 
 **`nlc_lossy` (inside `nlc_encoder`, which is a lossy-only wrapper, D1).**
 1. *Wavelet:* 3 levels of LeGall 5/3 lifting (`nlc_lift53` x3), streaming, 64-sample blocks.
@@ -69,9 +69,16 @@ on `rst_n && enable`, counters gated on slots while enabled, sample registers on
 `project.v` (config address/data gated). Clocked every cycle: the TT pin registers and
 the few flops that must run (`slot_sel` counters while enabled).
 
-**`nlc_out_fifo`.** 8 bytes, valid/ready. When full, the encoder is held, back-pressure reaches
-the per-channel FIFOs and they overwrite (F3). *D6/D7 land here and in the serialiser:* the
-`m_abort` token, flush on a blocked output, abort on disable.
+**Abort (D5/D6/D7).** `nlc_lossy` aborts the packet in flight when the coder falls more than
+a frame behind (blocked output: the next burst would overwrite one not yet coded) or on a
+short frame: issuer, coder and serialiser clear, samples are ignored while frames keep
+counting, and output resumes at the next packet start at which the FIFO takes bytes (its
+header carries that packet's seq, so the gap names the lost packets). The encoder ends a
+packet the host holds partly with the **abort token** (also when `enable` falls; its token
+logic is reset by `rst_n` only). On the TT pins: `m_last` = 1 with `m_valid` = 0, acked like a
+byte.
+
+**`nlc_out_fifo`.** 8 entries of {abort, last, byte}, valid/ready; `m_abort` with the head.
 
 ## Cost today
 
@@ -93,6 +100,6 @@ widths are already at the filter bounds; removing coder stage A saves 64 flops b
 | change | files | tests that must stay green |
 |---|---|---|
 | algorithm (shifts, block, tables) | `model/nlc/lossy.py`, then RTL constants, ROM via `scripts/gen_lossy_rom.py` | `pytest` (change guard), `test/lossy`, `test/core` |
-| D5 frame rule | `nlc_slot_sel.v`, frame counting in `nlc_lossy.sv` | T-ROB-4 |
-| D6/D7 abort, flush, reset | `nlc_out_fifo.v`, serialiser in `nlc_lossy.sv`, new `m_abort` port on `nlc_core`, pin encoding in `project.v` | T-OVF-1/2, T-IF-3b, T-ROB-2/3/7 |
+| D5 frame rule | `smp_tick`/`smp_short` in `nlc_slot_sel.v`, abort in `nlc_lossy.sv` | T-ROB-4 |
+| D6/D7 abort, resume, token | abort/skip/resume in `nlc_lossy.sv`, token in `nlc_encoder.v`, `nlc_out_fifo.v`, `m_abort` on `nlc_core`, pins in `project.v` | T-OVF-1/2, T-IF-3b, T-ROB-2/3/7 |
 | power (clock gating) | `nlc_icg.sv`; parent gates and `nlc_greg` rows in `nlc_lossy.sv`, `nlc_rans.sv` | everything + `nlc.py power` (fails if an activity annotation is lost) |

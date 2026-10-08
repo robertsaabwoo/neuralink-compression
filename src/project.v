@@ -13,6 +13,8 @@
 //   uio[5]      in   cfg_en    1: strobes carry config bytes, address then data
 //   uio[6]      out  m_valid
 //   uio[7]      out  m_last    the byte on uo_out ends a packet
+//                              m_last = 1 with m_valid = 0: abort token (D6/D7), the
+//                              host drops its partial packet and acks it like a byte
 //   uo_out[7:0] out  m_data
 //
 // Off chip, strobes are edge-triggered rather than cycle-exact valid/ready
@@ -83,18 +85,19 @@ module tt_um_nlc_compressor (
   wire [7:0] m_data;
   wire       m_valid;
   wire       m_last;
+  wire       m_abort;
   wire       overflow;
 
   nlc_core core (
       .clk(clk), .rst_n(rst_n),
       .s_valid(strobe & ~cfg_en), .s_frame(uio_q[3]), .s_data({uio_q[1:0], ui_q}),
       .cfg_we(cfg_we), .cfg_addr(cfg_addr), .cfg_data(cfg_data),
-      .m_data(m_data), .m_valid(m_valid), .m_last(m_last), .m_ready(ack),
+      .m_data(m_data), .m_valid(m_valid), .m_last(m_last), .m_abort(m_abort), .m_ready(ack),
       .overflow(overflow)
   );
 
   assign uo_out  = m_data;
-  assign uio_out = {m_last, m_valid, 6'b0};
+  assign uio_out = {m_abort | (m_valid & m_last), m_valid & ~m_abort, 6'b0};
   assign uio_oe  = 8'b1100_0000;
 
   wire _unused = &{ena, uio_q[7:6], overflow, 1'b0};

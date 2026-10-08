@@ -24,7 +24,9 @@ module nlc_slot_sel #(
     output wire [ADC_BITS-1:0]  smp_data,   // smp_data .. smp_last: valid with smp_valid
     output wire [SEL_W-1:0]     smp_ch,
     output wire                 smp_first,  // channel 0 of a frame
-    output wire                 smp_last    // channel n_sel-1 of a frame
+    output wire                 smp_last,   // channel n_sel-1 of a frame
+    output reg                  smp_tick,   // a new frame started (s_frame), not the first
+    output reg                  smp_short   // with smp_tick: the frame that ended was short
 );
 
   reg             running;
@@ -43,7 +45,7 @@ module nlc_slot_sel #(
   wire take  = s_valid && (hit || s_frame);
   wire gclk_s, gclk_h;
   nlc_icg u_cg_s (.clk(clk), .en(clr_n && s_valid),              .gclk(gclk_s));
-  nlc_icg u_cg_h (.clk(clk), .en(clr_n && (take || smp_valid)),  .gclk(gclk_h));
+  nlc_icg u_cg_h (.clk(clk), .en(clr_n && (take || smp_valid || smp_tick)), .gclk(gclk_h));
 
   nlc_greg #(.W(ADC_BITS + SEL_W + 2)) u_smp (
       .clk(gclk_h), .en(clr_n && s_valid && hit),
@@ -60,8 +62,12 @@ module nlc_slot_sel #(
       running   <= 1'b0;
       sel_idx   <= 0;
       smp_valid <= 1'b0;
-    end else begin                                    // take or smp_valid
+      smp_tick  <= 1'b0;
+      smp_short <= 1'b0;
+    end else begin                                    // take, smp_valid or smp_tick
       smp_valid <= take && hit;
+      smp_tick  <= take && s_frame && running;
+      smp_short <= sel_idx != n_sel;                  // D5: channels of the frame not reached
       if (take) begin
         if (s_frame) running <= 1'b1;
         sel_idx <= hit ? idx + 1'b1 : idx;

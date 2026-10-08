@@ -77,6 +77,7 @@ power scenarios of 4.4 (`test_power_op/n4/worst/floor`), `gl_dump.v` takes `+vcd
 | 2026-10-08 | `test/core` on the clock-gated RTL (5a94b62), parallel runner (6 jobs, 10 min instead of ~25) | 34/46 pass, 0 unexpected; the 12 failures are the known D5-D7 requirement tests |
 | 2026-10-08 | **intended format change, T-CHG-7 golden accepted:** eager FIFO drain, symbols coded frame by frame, channel by channel, burst in push order (`nlc.lossy.coding_order`) instead of j-major | packet sizes unchanged (synthetic 730/729, lfsr 5510/5445 bytes): only the byte order differs |
 | 2026-10-08 | full check (model, lint, rtl, core, synth, sta, gl, power; 17.8 min with the parallel runner) on eager drain + gated TT top | all pass except T-ROB-5 (test deposited into renamed registers; fixed: it now finds every `nlc_greg`, 189 registers, 3/3 pass); new T-PWR-2 (`t_pwr_op`/`t_pwr_idle`, `nlc_core` gate level): 15.9 / 2.5 uW |
+| 2026-10-08 | D5-D7 implemented (abort/skip/resume, abort token, short frame = abort); lint, rtl, core (10.7 min), replay | **all pass: test/core 48/48, KNOWN_FAIL empty**; lossy 8/8, TT top 4/4, replay 4/4. Gate level / STA not re-run for D5-D7 (functional check only, as asked); `gds` action on the 4x2 tiles is the next hardening check |
 
 Findings F1-F9, budgets and the measured data: [results.md](results.md).
 

@@ -55,6 +55,8 @@ async def reset(dut, n_sel=N_SEL):
     dut.smp_data.value = 0
     dut.smp_ch.value = 0
     dut.smp_last.value = 0
+    dut.smp_tick.value = 0
+    dut.smp_short.value = 0
     dut.m_ready.value = 0
     await ClockCycles(dut.clk, 3)
     dut.rst_n.value = 1
@@ -63,23 +65,22 @@ async def reset(dut, n_sel=N_SEL):
 
 
 async def drive(dut, x, slots, frame_cycles):
-    """One frame every frame_cycles clocks; channel c in slot slots[c], one per clock."""
+    """One frame every frame_cycles clocks; channel c in slot slots[c], one per clock.
+    smp_tick marks slot 0 of every frame after the first (as nlc_slot_sel does)."""
     await FallingEdge(dut.clk)
-    for row in x:
-        t = 0
-        for c, s in enumerate(slots):
-            if s > t:
-                dut.smp_valid.value = 0
-                await ClockCycles(dut.clk, s - t, rising=False)
-                t = s
-            dut.smp_valid.value = 1
-            dut.smp_data.value = int(row[c])
-            dut.smp_ch.value = c
-            dut.smp_last.value = int(c == len(row) - 1)
+    at = {s: c for c, s in enumerate(slots)}
+    for f, row in enumerate(x):
+        for t in range(frame_cycles):
+            dut.smp_tick.value = int(f > 0 and t == 0)
+            c = at.get(t)
+            dut.smp_valid.value = int(c is not None)
+            if c is not None:
+                dut.smp_data.value = int(row[c])
+                dut.smp_ch.value = c
+                dut.smp_last.value = int(c == len(row) - 1)
             await FallingEdge(dut.clk)
-            t += 1
-        dut.smp_valid.value = 0
-        await ClockCycles(dut.clk, frame_cycles - t, rising=False)
+    dut.smp_valid.value = 0
+    dut.smp_tick.value = 0
 
 
 async def sink(dut, n_packets, p_ready, rng):

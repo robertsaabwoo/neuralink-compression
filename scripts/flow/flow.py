@@ -60,10 +60,7 @@ _OVF = ("F3: a blocked output must abort the packet, flush and resume at the nex
         "today every later packet is corrupt")
 _FRAME = ("F4: a short frame must repeat the missing channels' previous samples (D5); "
           "today the channel order slips for good")
-KNOWN_FAIL = {
-    "t_ovf_1": _OVF, "t_ovf_2": _OVF, "t_rob_4": _FRAME,     # t_rob_4 long/missing pass
-    "t_rob_2": _ABORT, "t_rob_3": _ABORT,
-}
+KNOWN_FAIL: dict[str, str] = {}     # D5-D7 implemented 2026-10-08 (was: t_ovf_1/2, t_rob_2/3/4)
 # functional coverage bins the T2 regression must hit (docs/testing.md 4.5)
 COVERAGE_BINS = ([f"esc_ctx{c}" for c in range(4)] + ["esc_consecutive", "esc_last_symbol"]
                  + [f"occ_{k}" for k in (1, 2, 4)]     # burst buffer after a push

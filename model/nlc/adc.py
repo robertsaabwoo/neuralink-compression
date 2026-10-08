@@ -10,6 +10,10 @@ slots[c] of that frame. Faults resolve as:
   missing s_frame               two frames merge into one long frame: the second is ignored
 
 So every frame yields exactly one sample per channel and the channel order never slips.
+The hardware does not pad (decision D5, revised 2026-10-08): it aborts the packet that holds
+a short frame and resumes at the next one; the padding here only keeps the frames-as-driven
+count right for the packets after it, which do not depend on the short frame's values
+(blocks and rANS states restart at every packet).
 """
 
 from __future__ import annotations

@@ -26,6 +26,15 @@
 // Requirements: frames are long enough to absorb the packet flush (about
 // coder depth + 3 * N_SEL * SB / 2 cycles; depth 2, or up to Q_W + 3 with DIV_REG), e.g. a 256-slot mux at one slot per clock.
 // enable = 0 clears everything; the next packet is seq 0.
+//
+// Abort (D5/D6): when the coder falls more than a frame behind (a burst would be
+// overwritten: blocked output) or a frame was short (s_frame early), the packet in
+// flight is dropped: issuer, coder and serialiser are cleared, samples are ignored but
+// frames are still counted (smp_tick), and output resumes at the next packet boundary
+// at which the output can take bytes again; its header carries that packet's seq, so the
+// gap names the lost packets. abort_req tells the encoder to end a partly sent packet
+// with the abort token. Blocks and rANS states restart at every packet boundary, so
+// nothing else needs clearing.
 module nlc_lossy #(
     parameter int N_SEL = 8,
     parameter int SEL_W = 3,
@@ -41,12 +50,15 @@ module nlc_lossy #(
     input  logic [9:0]       smp_data,
     input  logic [SEL_W-1:0] smp_ch,
     input  logic             smp_last,     // channel n_sel-1 of a frame
+    input  logic             smp_tick,     // a new frame started (s_frame; not the first)
+    input  logic             smp_short,    // with smp_tick: the frame that ended was short
 
     output logic             m_valid,
     input  logic             m_ready,
     output logic [7:0]       m_data,
     output logic             m_last,
-    output logic             overflow
+    output logic             overflow,     // sticky: a packet was aborted (blocked output)
+    output logic             abort_req     // packet in flight dropped (one clock)
 );
   // fixed by LossyConfig: adc_bits 10, block 64, levels 3, shifts a 1 / d (3, 2, 2),
   // s_max 31, esc_bytes 2, prob_bits 12, lsh 2
@@ -66,6 +78,11 @@ module nlc_lossy #(
   // Global schedule state
   // ---------------------------------------------------------------------------
   logic [5:0] n;                         // frame index in the block (samples)
+  logic [BPP_W-1:0] blk;                 // block in the packet (samples)
+  logic [5:0] pk;                        // packet number (samples): seq after a resume
+  logic [5:0] n_eff;                     // frame of this cycle's sample (smp_tick counts now)
+  logic       skip, abort_now, resume_now, run;
+  assign n_eff = n + 6'(smp_tick);
   logic [SEL_W+1:0] pending;             // channel samples whose burst is not issued yet
   logic [SEL_W-1:0] rr;                  // issuer: channel
   logic [1:0]       kk;                  // issuer: symbol in the channel's burst
@@ -105,7 +122,7 @@ module nlc_lossy #(
   logic e1_we, o1_we, dp1_we, e2_we, o2_we, dp2_we, e3_we, o3_we, dp3_we;
 
   nlc_lift53 #(.W(10), .N_W(6)) u_l1 (
-      .v(smp_valid), .idx(n), .x(x0),
+      .v(smp_valid), .idx(n_eff), .x(x0),
       .e(e1[smp_ch]), .o(o1[smp_ch]), .dp(dp1[smp_ch]),
       .pv(pv1), .p(p1), .a(a1), .d(d1), .e_we(e1_we), .o_we(o1_we), .dp_we(dp1_we));
   nlc_lift53 #(.W(11), .N_W(5)) u_l2 (
@@ -167,18 +184,18 @@ module nlc_lossy #(
   logic clk_l, clk_s, clk_i;              // lossy core, sample (8 of 256 clocks), issuer
   logic r_fire, c_active;
   // grandparent: the block gates below only see the clock while something is happening
-  nlc_icg u_cg_l (.clk(clk), .en(smp_valid || iss_busy || c_active || (m_valid && m_ready)),
-                  .gclk(clk_l));
-  nlc_icg u_cg_s (.clk(clk_l), .en(smp_valid),           .gclk(clk_s));
   logic iss_busy;
   assign iss_busy = pending != '0;
-  nlc_icg u_cg_i (.clk(clk_l), .en(smp_valid || iss_busy), .gclk(clk_i));
+  nlc_icg u_cg_l (.clk(clk), .en(smp_valid || smp_tick || iss_busy || c_active || abort_now ||
+                                 (m_valid && m_ready)), .gclk(clk_l));
+  nlc_icg u_cg_s (.clk(clk_l), .en(smp_valid || smp_tick), .gclk(clk_s));
+  nlc_icg u_cg_i (.clk(clk_l), .en(smp_valid || iss_busy || abort_now), .gclk(clk_i));
 
   genvar gc;
   generate
     for (gc = 0; gc < N_SEL; gc++) begin : g_ch
       logic wr;                          // this channel's sample, outside clear
-      assign wr = clr_n && smp_valid && smp_ch == SEL_W'(gc);
+      assign wr = clr_n && run && smp_valid && smp_ch == SEL_W'(gc);
       nlc_greg #(.W(10)) u_e1  (.clk(clk_s), .en(wr && e1_we),  .d(x0),        .q(e1[gc]));
       nlc_greg #(.W(10)) u_o1  (.clk(clk_s), .en(wr && o1_we),  .d(x0),        .q(o1[gc]));
       nlc_greg #(.W(11)) u_dp1 (.clk(clk_s), .en(wr && dp1_we), .d(d1),        .q(dp1[gc]));
@@ -243,13 +260,42 @@ module nlc_lossy #(
   // ---------------------------------------------------------------------------
   // Sequential: front end schedule (clk_s), issuer (clk_i), overflow (clk)
   // ---------------------------------------------------------------------------
+  // frames are counted from s_frame (smp_tick), also while skipping
+  logic pkt_start;                        // this tick starts frame 0 of a packet
+  assign pkt_start = smp_tick && &n && &blk;
   always_ff @(posedge clk_s or negedge clr_n) begin
-    if (!clr_n) n <= '0;                  // smp_valid: per-channel state is in g_ch
-    else if (smp_last) n <= n + 1'b1;
+    if (!clr_n) begin
+      n   <= '0;
+      blk <= '0;
+      pk  <= '0;
+    end else if (smp_tick) begin
+      n <= n + 1'b1;
+      if (&n) begin
+        blk <= blk + 1'b1;
+        if (&blk) pk <= pk + 1'b1;
+      end
+    end
+  end
+
+  // abort: the coder is more than a frame behind, or a frame was short; resume at the
+  // first packet start at which the output takes bytes again (the token is out first)
+  assign abort_now  = clr_n && !skip && (pending > (SEL_W+2)'(n_sel) || (smp_tick && smp_short));
+  assign resume_now = skip && pkt_start && m_ready;
+  assign run        = !skip || resume_now;    // samples of this cycle are processed
+  assign abort_req  = abort_now;
+  always_ff @(posedge clk_l or negedge clr_n) begin
+    if (!clr_n)         skip <= 1'b0;
+    else if (abort_now) skip <= 1'b1;
+    else if (resume_now) skip <= 1'b0;
   end
 
   always_ff @(posedge clk_i or negedge clr_n) begin
     if (!clr_n) begin
+      pending <= '0;
+      rr      <= '0;
+      kk      <= '0;
+      j       <= '0;
+    end else if (abort_now || (skip && !resume_now)) begin  // dropped: restart at a packet
       pending <= '0;
       rr      <= '0;
       kk      <= '0;
@@ -270,7 +316,7 @@ module nlc_lossy #(
     end
   end
 
-  always_ff @(posedge clk_i or negedge clr_n) begin // sticky; pending only moves on clk_i
+  always_ff @(posedge clk_i or negedge clr_n) begin // sticky: an abort for blocked output
     if (!clr_n) overflow <= 1'b0;
     else if (pending > (SEL_W+2)'(n_sel)) overflow <= 1'b1;
   end
@@ -283,7 +329,7 @@ module nlc_lossy #(
   logic [3:0]  c_keep;
 
   nlc_rans #(.N_CH(N_SEL), .CH_W(SEL_W), .DIV_REG(11'(DIV_REG))) u_rans (
-      .clk(clk_l), .rst_n(clr_n), .active(c_active),
+      .clk(clk_l), .rst_n(clr_n && !skip), .active(c_active),
       .s_tvalid(r_valid), .s_tready(r_ready), .s_tdata(hsym), .s_tctx(hctx),
       .s_tchan(rr_iss), .s_traw_v(is_esc), .s_traw(hraw), .s_tlast(r_last),
       .m_tvalid(c_valid), .m_tready(c_ready), .m_tdata(c_data), .m_tkeep(c_keep),
@@ -300,19 +346,25 @@ module nlc_lossy #(
 
   assign b_last  = c_keep[3] ? 2'd3 : c_keep[2] ? 2'd2 : c_keep[1] ? 2'd1 : 2'd0;
   assign w_end   = bi == b_last;
-  assign m_valid = c_valid;
+  assign m_valid = c_valid && !skip;
   assign m_data  = need_hdr ? {2'b01, seq} : c_data[8 * bi +: 8];
   assign m_last  = !need_hdr && w_end && c_last;
   assign c_ready = m_ready && !need_hdr && w_end;
 
   logic clk_o;
-  nlc_icg u_cg_o (.clk(clk_l), .en(m_valid && m_ready), .gclk(clk_o));
+  nlc_icg u_cg_o (.clk(clk_l), .en((m_valid && m_ready) || abort_now || resume_now),
+                  .gclk(clk_o));
 
   always_ff @(posedge clk_o or negedge clr_n) begin
     if (!clr_n) begin
       bi       <= '0;
       need_hdr <= 1'b1;
       seq      <= '0;
+    end else if (abort_now) begin         // the packet in flight is dropped
+      bi       <= '0;
+      need_hdr <= 1'b1;
+    end else if (resume_now) begin        // first packet after an abort: its own seq
+      seq <= pk + 1'b1;                   // resume is at a packet start: pk counts now
     end else if (need_hdr) begin          // a byte was taken
       need_hdr <= 1'b0;
     end else if (w_end) begin

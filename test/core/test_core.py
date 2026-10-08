@@ -340,15 +340,25 @@ FRAME_FAULTS = {
 @cocotb.test(**TIMEOUT)
 @cocotb.parametrize(fault=list(FRAME_FAULTS))
 async def t_rob_4(dut, fault):
-    """T-ROB-4: frame faults in packet 0 (early s_frame, late s_frame, missing s_frame).
-    Every packet must equal the model on the frames as driven, under the frame rule D5
-    (short frame: missing channels repeat their previous sample). C-IF-8."""
-    env = await fresh(dut, f"t_rob_4_{fault}")
+    """T-ROB-4: frame faults in packet 0 (early s_frame, late s_frame, missing s_frame), D5.
+    A short frame is a fault: the packet holding it is aborted (abort token, seq gap) and the
+    next packet is bit-exact against the model on the frames as driven (the short frame counts
+    as one frame). Late or missing s_frame: every packet bit-exact (extra slots are ignored, a
+    missing s_frame merges two frames). C-IF-8."""
+    short = any(f[0] == "short" for f in FRAME_FAULTS[fault])
+    n = 3 if short else 2
+    env = await fresh(dut, f"t_rob_4_{fault}", allow_loss=short, allow_abort=short)
     env.configure(SPREAD)
-    env.play_source("real", 2)
+    env.play_source("real", n)
     await env.until(lambda e: e.data_frame == 20, 30 * 256)
     env.frame_faults.extend(FRAME_FAULTS[fault])
-    await env.run(2)
+    await env.run(n)
+    seg = env.sb.seg
+    if short:
+        if 0 in seg.got:
+            env.sb.errors.append("packet 0 holds a short frame but was delivered (D5: abort)")
+        if 1 not in seg.got:
+            env.sb.errors.append("packet 1, after the short frame, was not delivered")
     report(env, {"fault": fault, "frame_faults": FRAME_FAULTS[fault]})
 
 
