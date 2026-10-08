@@ -38,7 +38,13 @@ module tt_um_nlc_compressor (
   reg       strobe_q;
   reg       ack_q;
 
-  always @(posedge clk) begin
+  // Registers sharing a clock net with clock gates get their own always-on gate: CTS pads
+  // registers that sit next to gates with latency delay buffers (docs/results.md F19).
+  // The pin registers sample every cycle (the gate is always on).
+  wire clk_pins;
+  nlc_icg u_cg_pins (.clk(clk), .en(1'b1), .gclk(clk_pins));
+
+  always @(posedge clk_pins) begin
     if (!rst_n) begin
       ui_q     <= 8'd0;
       uio_q    <= 8'd0;
@@ -67,7 +73,7 @@ module tt_um_nlc_compressor (
   nlc_greg #(.W(8)) u_cfg_addr (.clk(clk), .en(cfg_strobe & ~have_addr), .d(ui_q), .q(cfg_addr));
   nlc_greg #(.W(8)) u_cfg_data (.clk(clk), .en(cfg_strobe &  have_addr), .d(ui_q), .q(cfg_data));
 
-  always @(posedge clk) begin
+  always @(posedge clk_pins) begin
     if (!rst_n) begin
       have_addr <= 1'b0;
       cfg_we    <= 1'b0;
