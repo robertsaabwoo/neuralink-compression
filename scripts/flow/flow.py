@@ -46,7 +46,7 @@ PDK = Path(os.environ.get("NLC_PDK", "/pdk"))
 LIB = {"tt": PDK / "lib/sky130_fd_sc_hd__tt_025C_1v80.lib",
        "ss": PDK / "lib/sky130_fd_sc_hd__ss_100C_1v60.lib",
        "ff": PDK / "lib/sky130_fd_sc_hd__ff_n40C_1v95.lib"}
-LOSSY_SRC = ["nlc_lossy.sv", "nlc_lift53.sv", "nlc_rans.sv", "nlc_lossy_rom.v"]
+LOSSY_SRC = ["nlc_lossy.sv", "nlc_lift53.sv", "nlc_rans.sv", "nlc_lossy_rom.v", "nlc_icg.sv"]
 STEPS = ["model", "lint", "rtl", "core", "synth", "area", "sta", "gl", "power", "compress", "algo"]
 AREA_SWEEP = [2, 4, 8, 16]    # N_SEL values for T-AREA-2 (SEL_W >= 1, so no N_SEL = 1)
 # TT top-level tests for modes not in silicon (D1): skipped by the tests themselves
@@ -75,7 +75,8 @@ COVERAGE_BINS = ([f"esc_ctx{c}" for c in range(4)] + ["esc_consecutive", "esc_la
                  + [f"enable_drop_{p}" for p in ("midframe", "midblock", "midpacket", "flush")])
 POWER_SCENARIOS = {   # name: (test in test/lossy, VCD start in frames: skip start-up)
     "op": ("test_power_op", 64), "op4": ("test_power_n4", 64),
-    "worst": ("test_power_worst", 64), "floor": ("test_power_floor", 0)}
+    "worst": ("test_power_worst", 64), "floor": ("test_power_floor", 0),
+    "idle": ("test_power_idle", 0)}
 
 BUDGETS = json.loads((HERE / "budgets.json").read_text())
 OP = BUDGETS["operating_point"]
@@ -240,7 +241,8 @@ def collect_core(r: Run, res_dir: Path) -> None:
     r.info["core_errors"] = {k: v["errors"][:3] for k, v in runs.items() if v["n_errors"]}
 
 
-SYNTH = """read_verilog -sv -I{src} {files}
+SYNTH = """read_liberty -lib {lib}
+read_verilog -sv -I{src} {files}
 hierarchy -check -top {top}
 synth -top {top} {flatten}
 dfflibmap -liberty {lib}
@@ -257,6 +259,7 @@ hilomap -singleton -hicell sky130_fd_sc_hd__conb_1 HI -locell sky130_fd_sc_hd__c
 insbuf -buf sky130_fd_sc_hd__buf_1 A X
 opt_clean -purge
 rename -hide w:* x:* %d
+rename -hide c:*
 rename -enumerate
 write_verilog -noattr -noexpr -nohex -nodec {netlist}"""
 
@@ -319,7 +322,9 @@ def step_area(r: Run) -> None:
                               extra="", stat=stat)
         script = script.replace("hierarchy -check -top nlc_lossy",
                                 f"chparam -set N_SEL {n} -set SEL_W {w} nlc_lossy\n"
-                                "hierarchy -check -top nlc_lossy")
+                                "hierarchy -check -top nlc_lossy\n"
+                                # chparam makes the top a $paramod; synth -top needs the name
+                                "rename -top nlc_lossy")
         (r.out / f"area_nsel{n}.ys").write_text(script)
         code, _ = r.sh(f"yosys -q -s {r.out / f'area_nsel{n}.ys'}", f"area_nsel{n}.log")
         if code or not stat.exists():
@@ -466,8 +471,10 @@ def step_power(r: Run, quick: bool = False) -> None:
         return
     period = OP["clock_period_ns"]
     results = {}
-    runs = [("idle", "")]                                   # clock running, no samples
-    for name in (["op"] if quick else list(POWER_SCENARIOS)):
+    # idle (enable = 0) is simulated too: with clock gating, what toggles depends
+    # on the gate enables, which OpenSTA cannot infer without activity
+    runs = []
+    for name in (["op", "idle"] if quick else list(POWER_SCENARIOS)):
         vcd = _scenario_vcd(r, net, name)
         if vcd is None:
             continue
@@ -484,6 +491,10 @@ def step_power(r: Run, quick: bool = False) -> None:
         (r.out / f"power_{tag}.tcl").write_text(tcl)
         _, text = r.sh(f"sta -no_splash -exit {r.out / f'power_{tag}.tcl'}", f"power_{tag}.log")
         results[tag] = _power(text)
+        lost = len(re.findall(r"^Warning \d+: .* not found", text, re.M))
+        if lost:
+            r.failed_tests.append(f"power {tag}: {lost} activity annotations not applied "
+                                  f"(see power_{tag}.log)")
     if "Total" in results.get("idle", {}):
         r.metrics["power_idle_uw"] = results["idle"]["Total"]["total"]
     if "Total" in results.get("worst", {}):

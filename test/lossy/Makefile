@@ -13,7 +13,8 @@ COCOTB_TEST_MODULES ?= test_lossy
 
 ifneq ($(GATES),yes)
 SIM_BUILD = sim_build/rtl
-VERILOG_SOURCES = $(SRC)/nlc_lossy.sv $(SRC)/nlc_lift53.sv $(SRC)/nlc_rans.sv $(SRC)/nlc_lossy_rom.v
+VERILOG_SOURCES = $(SRC)/nlc_lossy.sv $(SRC)/nlc_lift53.sv $(SRC)/nlc_rans.sv $(SRC)/nlc_lossy_rom.v \
+                  $(SRC)/nlc_icg.sv
 else
 NLC_PDK ?= /pdk
 SIM_BUILD = sim_build/gl

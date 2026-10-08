@@ -38,13 +38,13 @@ hold at the fast corner (-40 C, 1.95 V).
 |---|---|---|
 | lint errors | 0 (46 `-Wall` warnings in the rest of the TT design, none fatal) | PASS |
 | tests | model 47/47, lossy RTL 3/3, rANS 6/6, TT top 3/7 (4 pending: modes 0/2/3 not implemented), gate-level lossy pass | PASS |
-| lossy cell area | 128,000 um^2 (10,601 cells, 2,681 flops = 62% of area) | WARN |
+| lossy cell area | 76,900 um^2 (2,127 flops + 159 clock gates; was 128,000) | PASS |
 | area per channel | 0.016 mm^2 | WARN |
 | TT design utilisation | 48% of 8x2 (139,400 um^2) | PASS |
 | critical path (slow corner) | 61.9 ns: slack **-41.9 ns at 20 ns** | **FAIL** |
 | setup slack at 200 ns | +138 ns | PASS |
 | hold slack | +0.24 ns | PASS |
-| lossy core power | **628 uW** at 5 MHz | **FAIL** |
+| lossy core power | 9.5 uW op, 0.77 uW idle at 5 MHz (was 628 uW; clock gating 2026-10-08) | PASS |
 | of which flop clock pins (idle, no data) | 618 uW (98%) | |
 | of which data activity | ~11 uW (glitches add ~0.3 uW) | |
 | leakage | 0.04 uW | |
@@ -56,7 +56,8 @@ hold at the fast corner (-40 C, 1.95 V).
 
 ### What the failures mean
 
-- **Power is clock power.** Every one of the 2,681 flip-flops is clocked every
+- **Fixed 2026-10-08 (clock gating, docs/results.md F11); kept for the record:**
+  **Power is clock power.** Every one of the 2,681 flip-flops is clocked every
   cycle (~0.23 uW each at 5 MHz), but each channel's ~220 bits of state change
   once per 256-cycle frame and the rANS pipeline is idle ~97% of the time. Clock
   gating (sky130 `dlclkp` integrated clock gates per channel row, and on the

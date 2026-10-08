@@ -137,6 +137,10 @@ def activity_tcl(netlist: Path, vcd: Path, lib: Path, out_func: Path, out_raw: P
             if s is None:
                 missing += 1
                 continue
+            if "dlclkp" in cell:
+                # gated clock: its pulses are real transitions, not glitches, and
+                # sampling at clk edges would see it constant (free clock power)
+                s = (s[1], s[1], s[1] // 4)
             emit(f"-pins [get_pins {{{inst}/{pin}}}]", s)
     for hi, lo, name in PORT_RE.findall(text):
         if name == clock:

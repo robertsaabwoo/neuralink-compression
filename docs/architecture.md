@@ -39,14 +39,27 @@ the last channel, which misaligns everything (F4).
    bit slices, no signed casts (C-RTL-2).
 3. *Per-channel FIFO*, 8 x 13 bits per channel: a sample pushes 0/1/2/4 symbols, the coder
    pops one per sample, round-robin over channels. Peak 7, lag ~6 frames (307 us).
-4. *rANS (`nlc_rans`):* one 22-bit state per channel, one symbol per clock, 13-stage
-   pipeline (bit-serial divider). Static tables in a synthesised ROM (`nlc_lossy_rom.v`):
+4. *rANS (`nlc_rans`):* one 22-bit state per channel, one symbol per clock, 2 stages:
+   state read + ROM, then renorm + a 10-step combinational divider + write-back (`DIV_REG`
+   can put registers back between the steps; the old 13-stage pipeline cost 547 more flops). Static tables in a synthesised ROM (`nlc_lossy_rom.v`):
    4 contexts, 64 symbols + escape (escape = 2 raw bytes). 0-4 bytes per symbol. Packet end:
    flush all 8 states, 3 bytes each.
 5. *Serialiser:* header `{mode = 1, seq[5:0]}`, then the coder bytes, `m_last` on the last.
 
 A packet = 4 blocks = 256 frames (13.1 ms), ~650 bytes on real data, up to ~5,500 on noise.
 Packets decode independently. Format spec: docstrings of `model/nlc/lossy.py`, `rans_tdm.py`.
+
+**Clock gating (`nlc_icg.sv`).** Every register that is not needed every cycle is behind
+a sky130 `dlclkp` integrated clock gate, in two levels. Parent gates open only when a block
+has work: `u_cg_s` (a sample, 8 of 256 clocks), `u_cg_i` (sample or pop), `u_cg_o`
+(serialiser), `u_rans.u_cg_c` (coder busy). Under them, `nlc_greg` registers (one gate +
+plain `dfxtp`, no enable mux) hold each channel's wavelet fields, each FIFO slot, each coder
+state row, stage A, the output word and the serialiser buffer. Control registers clear
+asynchronously on `clr_n` (`rst_n && enable`), so a disabled core sees no clock edge.
+RTL simulation models `nlc_greg` as an enable flop (same behaviour, faster in Icarus);
+synthesis and gate-level use the real cell (`+define+NLC_ICG_SIM` simulates the gate in RTL).
+Only `overflow` runs on `clk` in the core. The TT top (`project.v`, `nlc_cfg`, `nlc_slot_sel`,
+`nlc_out_fifo`) is **not gated yet**: ~216 flops clocked every cycle.
 
 **`nlc_out_fifo`.** 8 bytes, valid/ready. When full, the encoder is held, back-pressure reaches
 the per-channel FIFOs and they overwrite (F3). *D6/D7 land here and in the serialiser:* the
@@ -56,14 +69,15 @@ the per-channel FIFOs and they overwrite (F3). *D6/D7 land here and in the seria
 
 | | value |
 |---|---|
-| area | 128,000 um^2 lossy core; 48% of an 8x2 TT design |
-| flip-flops | 2,681 (62% of area) |
+| area | 76,900 um^2 lossy core (was 128,000); 30% of an 8x2 TT design |
+| flip-flops | 2,127 + 159 clock gates (was 2,681: 13-stage coder pipeline, no gating) |
 | state per channel | ~240 b: 114 wavelet + 104 FIFO + 22 coder (Neuralink spike path: 226 b/ch) |
-| timing | 62 ns critical path (fine at 200 ns) |
-| power | 629 uW, 618 of it flop clock pins (budget 40 uW) |
+| timing | 129 ns slack at ss / 200 ns; deepest path ~121 cells (TT unit-delay gate sim needs < 200) |
+| power | 9.5 uW op, 0.8 uW idle, lossy core only (was 629 uW; budget 40 uW). TT top not measured |
 
-Main design-phase lever: power is clock power. Each channel's state changes on 8 of 256 clocks,
-but every flop is clocked every cycle: clock gating or denser storage (latches, SRAM).
+Remaining levers (2026-10-08): gate the TT top (~50 uW estimated, unmeasured); drain the
+per-channel FIFOs eagerly so 4 entries per channel suffice (format change, ~-9k um^2);
+latch-based storage for the gated rows (~-8k um^2, same-cycle read/write hazards).
 
 ## Where to change what
 
@@ -72,4 +86,4 @@ but every flop is clocked every cycle: clock gating or denser storage (latches, 
 | algorithm (shifts, block, tables) | `model/nlc/lossy.py`, then RTL constants, ROM via `scripts/gen_lossy_rom.py` | `pytest` (change guard), `test/lossy`, `test/core` |
 | D5 frame rule | `nlc_slot_sel.v`, frame counting in `nlc_lossy.sv` | T-ROB-4 |
 | D6/D7 abort, flush, reset | `nlc_out_fifo.v`, serialiser in `nlc_lossy.sv`, new `m_abort` port on `nlc_core`, pin encoding in `project.v` | T-OVF-1/2, T-IF-3b, T-ROB-2/3/7 |
-| power (clock gating) | per-channel registers in `nlc_lossy.sv`, `nlc_rans.sv` | everything + `nlc.py power` |
+| power (clock gating) | `nlc_icg.sv`; parent gates and `nlc_greg` rows in `nlc_lossy.sv`, `nlc_rans.sv` | everything + `nlc.py power` (fails if an activity annotation is lost) |

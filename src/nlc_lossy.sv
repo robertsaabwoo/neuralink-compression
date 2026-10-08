@@ -22,12 +22,13 @@
 // up to a frame (packet flush). A lag of more than a frame sets `overflow`.
 //
 // Requirements: frames are long enough to absorb the packet flush (about
-// Q_W + 3 + 3 * N_SEL * SB / 2 cycles), e.g. a 256-slot mux at one slot per clock.
+// coder depth + 3 * N_SEL * SB / 2 cycles; depth 2, or up to Q_W + 3 with DIV_REG), e.g. a 256-slot mux at one slot per clock.
 // enable = 0 clears everything; the next packet is seq 0.
 module nlc_lossy #(
     parameter int N_SEL = 8,
     parameter int SEL_W = 3,
-    parameter int BPP_W = 2       // 2^BPP_W blocks of 64 frames per packet
+    parameter int BPP_W = 2,      // 2^BPP_W blocks of 64 frames per packet
+    parameter int   DIV_REG = 0      // coder divider registers (11-bit mask), see nlc_rans
 ) (
     input  logic             clk,
     input  logic             rst_n,
@@ -66,16 +67,19 @@ module nlc_lossy #(
   logic [5+BPP_W:0] j;                   // pop round within the packet
 
   // ---------------------------------------------------------------------------
-  // Per-channel state (no reset: every register is written before it is read)
+  // Per-channel state (no reset: every register is written before it is read).
+  // Clock-gated registers (nlc_greg): a channel's fields and FIFO slots only see
+  // a clock edge when they are written, i.e. on its own slot. Packed arrays,
+  // one element per channel / FIFO entry, driven by the nlc_greg instances.
   // ---------------------------------------------------------------------------
-  logic signed [9:0]  e1 [0:N_SEL-1], o1 [0:N_SEL-1];
-  logic signed [10:0] dp1[0:N_SEL-1];
-  logic signed [10:0] e2 [0:N_SEL-1], o2 [0:N_SEL-1];
-  logic signed [11:0] dp2[0:N_SEL-1];
-  logic signed [11:0] e3 [0:N_SEL-1], o3 [0:N_SEL-1];
-  logic signed [12:0] dp3[0:N_SEL-1];
-  logic signed [11:0] qa_prev [0:N_SEL-1];
-  logic [QW-1:0]        fifo [0:N_SEL*QDEPTH-1];   // {channel, slot}
+  logic [N_SEL-1:0][9:0]  e1, o1;
+  logic [N_SEL-1:0][10:0] dp1;
+  logic [N_SEL-1:0][10:0] e2, o2;
+  logic [N_SEL-1:0][11:0] dp2;
+  logic [N_SEL-1:0][11:0] e3, o3;
+  logic [N_SEL-1:0][12:0] dp3;
+  logic [N_SEL-1:0][11:0] qa_prev;
+  logic [N_SEL*QDEPTH-1:0][QW-1:0] fifo;           // {channel, slot}
   logic [1:0]           fctx [0:QDEPTH-1];         // context per slot: global
 
   // ---------------------------------------------------------------------------
@@ -122,13 +126,65 @@ module nlc_lossy #(
   assign q2  = quant({d2[11], d2}, 2);
   assign q3  = quant(d3, 2);
   assign qa3 = quant(a3, 1);
-  assign da3 = qa3 - ((p3 == '0) ? '0 : {qa_prev[smp_ch][11], qa_prev[smp_ch]});
+  logic [11:0] qa_p;                     // this channel's previous quantised a3
+  assign qa_p = qa_prev[smp_ch];
+  assign da3 = qa3 - ((p3 == '0) ? '0 : {qa_p[11], qa_p});
 
   // pushes this sample: d1 | d1 d2 | d1 d2 d3 a3   (always a prefix)
   logic [2:0] pushes;
   logic       pop_due;
   assign pushes  = {pv3, pv2 & ~pv3, pv1 & ~pv2};    // 0, 1, 2 or 4
   assign pop_due = (occ + 4'(pushes)) != '0;
+
+  // ---------------------------------------------------------------------------
+  // Per-channel state writes: one clock gate per (channel, field) and per
+  // (channel, FIFO slot). A sample writes FIFO slots wbase .. wbase+3 with
+  // d1, d2, d3, delta a3 (a prefix: pv3 => pv2 => pv1).
+  // ---------------------------------------------------------------------------
+  // FIFO slot s gets push (s - wbase): the same for every channel
+  logic [QDEPTH-1:0]         slot_we;
+  logic [QDEPTH-1:0][QW-1:0] slot_d;
+  always_comb begin
+    for (int s = 0; s < QDEPTH; s++) begin
+      case (3'(s) - wbase)
+        3'd0:    begin slot_we[s] = pv1; slot_d[s] = q1;  end
+        3'd1:    begin slot_we[s] = pv2; slot_d[s] = q2;  end
+        3'd2:    begin slot_we[s] = pv3; slot_d[s] = q3;  end
+        3'd3:    begin slot_we[s] = pv3; slot_d[s] = da3; end
+        default: begin slot_we[s] = 1'b0; slot_d[s] = da3; end
+      endcase
+    end
+  end
+
+  // Parent clock gates: a block's registers (and its child gates) only see a
+  // clock edge when the block has work. Control registers clear asynchronously
+  // on clr_n, so a disabled core (enable = 0) sees no clock edge at all (C-PWR-2).
+  logic clk_s, clk_i;                     // sample (8 of 256 clocks), issuer
+  logic r_fire;
+  nlc_icg u_cg_s (.clk(clk), .en(smp_valid),           .gclk(clk_s));
+  nlc_icg u_cg_i (.clk(clk), .en(smp_valid || r_fire), .gclk(clk_i));
+
+  genvar gc, gs;
+  generate
+    for (gc = 0; gc < N_SEL; gc++) begin : g_ch
+      logic wr;                          // this channel's sample, outside clear
+      assign wr = clr_n && smp_valid && smp_ch == SEL_W'(gc);
+      nlc_greg #(.W(10)) u_e1  (.clk(clk_s), .en(wr && e1_we),  .d(x0),        .q(e1[gc]));
+      nlc_greg #(.W(10)) u_o1  (.clk(clk_s), .en(wr && o1_we),  .d(x0),        .q(o1[gc]));
+      nlc_greg #(.W(11)) u_dp1 (.clk(clk_s), .en(wr && dp1_we), .d(d1),        .q(dp1[gc]));
+      nlc_greg #(.W(11)) u_e2  (.clk(clk_s), .en(wr && e2_we),  .d(a1),        .q(e2[gc]));
+      nlc_greg #(.W(11)) u_o2  (.clk(clk_s), .en(wr && o2_we),  .d(a1),        .q(o2[gc]));
+      nlc_greg #(.W(12)) u_dp2 (.clk(clk_s), .en(wr && dp2_we), .d(d2),        .q(dp2[gc]));
+      nlc_greg #(.W(12)) u_e3  (.clk(clk_s), .en(wr && e3_we),  .d(a2),        .q(e3[gc]));
+      nlc_greg #(.W(12)) u_o3  (.clk(clk_s), .en(wr && o3_we),  .d(a2),        .q(o3[gc]));
+      nlc_greg #(.W(13)) u_dp3 (.clk(clk_s), .en(wr && dp3_we), .d(d3),        .q(dp3[gc]));
+      nlc_greg #(.W(12)) u_qa  (.clk(clk_s), .en(wr && pv3),    .d(qa3[11:0]), .q(qa_prev[gc]));
+      for (gs = 0; gs < QDEPTH; gs++) begin : g_slot
+        nlc_greg #(.W(QW)) u_q (.clk(clk_s), .en(wr && slot_we[gs]), .d(slot_d[gs]),
+                                .q(fifo[gc * QDEPTH + gs]));
+      end
+    end
+  endgenerate
 
   // ---------------------------------------------------------------------------
   // Issuer: pop channel rr's FIFO head into the coder
@@ -138,7 +194,7 @@ module nlc_lossy #(
   logic          is_esc;
   logic [5:0]    hsym;
   logic [15:0]   hraw;
-  logic          r_valid, r_ready, r_fire, r_last;
+  logic          r_valid, r_ready, r_last;
   assign hv     = fifo[{rr, rbase}];
   assign hctx   = fctx[rbase];
   assign hmag   = hv[QW-1] ? ~hv + 1'b1 : hv;                 // |v|
@@ -150,54 +206,36 @@ module nlc_lossy #(
   assign r_fire  = r_valid && r_ready;
 
   // ---------------------------------------------------------------------------
-  // Sequential: front end, schedule, issuer
+  // Sequential: front end schedule (clk_s), issuer (clk_i), overflow (clk)
   // ---------------------------------------------------------------------------
-  always_ff @(posedge clk) begin
+  always_ff @(posedge clk_s or negedge clr_n) begin
     if (!clr_n) begin
-      n        <= '0;
-      wbase    <= '0;
-      rbase    <= '0;
-      occ      <= '0;
-      pending  <= '0;
-      rr       <= '0;
-      j        <= '0;
-      overflow <= 1'b0;
-    end else begin
-      if (smp_valid) begin
-        if (e1_we)  e1[smp_ch]  <= x0;
-        if (o1_we)  o1[smp_ch]  <= x0;
-        if (dp1_we) dp1[smp_ch] <= d1;
-        if (e2_we)  e2[smp_ch]  <= a1;
-        if (o2_we)  o2[smp_ch]  <= a1;
-        if (dp2_we) dp2[smp_ch] <= d2;
-        if (e3_we)  e3[smp_ch]  <= a2;
-        if (o3_we)  o3[smp_ch]  <= a2;
-        if (dp3_we) dp3[smp_ch] <= d3;
-        if (pv1) begin
-          fifo[{smp_ch, wbase}] <= q1;
-          fctx[wbase]           <= 2'd1;
-        end
-        if (pv2) begin
-          fifo[{smp_ch, wbase + 3'd1}] <= q2;
-          fctx[wbase + 3'd1]           <= 2'd2;
-        end
-        if (pv3) begin
-          fifo[{smp_ch, wbase + 3'd2}] <= q3;
-          fifo[{smp_ch, wbase + 3'd3}] <= da3;
-          fctx[wbase + 3'd2]           <= 2'd3;
-          fctx[wbase + 3'd3]           <= 2'd0;
-          qa_prev[smp_ch]              <= qa3[11:0];
-        end
-        if (smp_last) begin
-          n     <= n + 1'b1;
-          wbase <= wbase + pushes;
-          occ   <= occ + 4'(pushes) - 4'(pop_due);
-        end
+      n     <= '0;
+      wbase <= '0;
+      occ   <= '0;
+    end else begin                        // smp_valid: per-channel state is in g_ch
+      if (pv1) fctx[wbase]        <= 2'd1;
+      if (pv2) fctx[wbase + 3'd1] <= 2'd2;
+      if (pv3) begin
+        fctx[wbase + 3'd2] <= 2'd3;
+        fctx[wbase + 3'd3] <= 2'd0;
       end
+      if (smp_last) begin
+        n     <= n + 1'b1;
+        wbase <= wbase + pushes;
+        occ   <= occ + 4'(pushes) - 4'(pop_due);
+      end
+    end
+  end
 
+  always_ff @(posedge clk_i or negedge clr_n) begin
+    if (!clr_n) begin
+      rbase   <= '0;
+      pending <= '0;
+      rr      <= '0;
+      j       <= '0;
+    end else begin
       pending <= pending + (SEL_W+2)'(smp_valid && pop_due) - (SEL_W+2)'(r_fire);
-      if (pending > (SEL_W+2)'(n_sel)) overflow <= 1'b1;
-
       if (r_fire) begin
         if (rr == SEL_W'(n_sel - 1'b1)) begin
           rr    <= '0;
@@ -210,6 +248,11 @@ module nlc_lossy #(
     end
   end
 
+  always_ff @(posedge clk or negedge clr_n) begin   // sticky; checked every cycle
+    if (!clr_n) overflow <= 1'b0;
+    else if (pending > (SEL_W+2)'(n_sel)) overflow <= 1'b1;
+  end
+
   // ---------------------------------------------------------------------------
   // Coder
   // ---------------------------------------------------------------------------
@@ -217,7 +260,7 @@ module nlc_lossy #(
   logic [31:0] c_data;
   logic [3:0]  c_keep;
 
-  nlc_rans #(.N_CH(N_SEL), .CH_W(SEL_W)) u_rans (
+  nlc_rans #(.N_CH(N_SEL), .CH_W(SEL_W), .DIV_REG(11'(DIV_REG))) u_rans (
       .clk(clk), .rst_n(clr_n),
       .s_tvalid(r_valid), .s_tready(r_ready), .s_tdata(hsym), .s_tctx(hctx),
       .s_tchan(rr), .s_traw_v(is_esc), .s_traw(hraw), .s_tlast(r_last),
@@ -237,20 +280,25 @@ module nlc_lossy #(
   assign m_data  = need_hdr ? {2'b01, seq} : sbuf[7:0];
   assign m_last  = !need_hdr && scnt == 3'd1 && slast;
 
-  always_ff @(posedge clk) begin
+  logic c_take, s_shift, clk_o;
+  assign c_take  = c_valid && c_ready;
+  assign s_shift = m_valid && m_ready && !need_hdr;
+  nlc_icg u_cg_o (.clk(clk), .en(c_take || (m_valid && m_ready)), .gclk(clk_o));
+  nlc_greg #(.W(32)) u_sbuf (.clk(clk_o), .en(clr_n && (c_take || s_shift)),
+                             .d(c_take ? c_data : sbuf >> 8), .q(sbuf));
+
+  always_ff @(posedge clk_o or negedge clr_n) begin
     if (!clr_n) begin
       scnt     <= '0;
       need_hdr <= 1'b1;
       seq      <= '0;
     end else if (c_valid && c_ready) begin
-      sbuf  <= c_data;
       scnt  <= c_keep[3] ? 3'd4 : c_keep[2] ? 3'd3 : c_keep[1] ? 3'd2 : 3'd1;
       slast <= c_last;
     end else if (m_valid && m_ready) begin
       if (need_hdr) begin
         need_hdr <= 1'b0;
       end else begin
-        sbuf <= sbuf >> 8;
         scnt <= scnt - 1'b1;
         if (m_last) begin
           need_hdr <= 1'b1;

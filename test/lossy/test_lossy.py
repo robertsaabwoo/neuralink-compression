@@ -6,7 +6,8 @@ with a VCD; in RTL they are ordinary bit-exact tests):
   test_power_n4      real data, n_sel 4, 2 packets   (C-PWR-3)
   test_power_worst   generator LFSR, n_sel 8, 2 packets (C-PWR-5)
   test_power_floor   generator constant, n_sel 8, 1 packet (floor, info)
-  idle (enable = 0) needs no simulation: no net toggles except the clock.
+  test_power_idle    enable = 0, clock running        (C-PWR-2; simulated: with clock
+                     gating, what toggles depends on the gate enables)
 """
 
 import os
@@ -154,6 +155,16 @@ async def test_power_n4(dut):
 async def test_power_worst(dut):
     """Power scenario worst: generator LFSR on the selected slots, 8 channels, 2 packets."""
     await run(dut, 2, SPREAD, 256, 1.0, seed=6, source="lfsr")
+
+
+@cocotb.test(timeout_time=60, timeout_unit="sec")
+async def test_power_idle(dut):
+    """Power scenario idle: enable = 0 with the clock running, no samples."""
+    await reset(dut)
+    await ClockCycles(dut.clk, 4)
+    dut.enable.value = 0
+    await ClockCycles(dut.clk, 2 * 256)
+    assert dut.m_valid.value == 0 and dut.overflow.value == 0
 
 
 @cocotb.test(timeout_time=120, timeout_unit="sec")

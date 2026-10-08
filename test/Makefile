@@ -11,7 +11,7 @@ SIM ?= icarus
 FST ?= -fst
 TOPLEVEL_LANG ?= verilog
 SRC_DIR = $(CURDIR)/../src
-PROJECT_SOURCES = project.v nlc_core.v nlc_cfg.v nlc_slot_sel.v nlc_out_fifo.v nlc_encoder.v nlc_lossy.sv nlc_lift53.sv nlc_rans.sv nlc_lossy_rom.v
+PROJECT_SOURCES = project.v nlc_core.v nlc_cfg.v nlc_slot_sel.v nlc_out_fifo.v nlc_encoder.v nlc_lossy.sv nlc_lift53.sv nlc_rans.sv nlc_lossy_rom.v nlc_icg.sv
 ENCODER ?= user
 export ENCODER
 
