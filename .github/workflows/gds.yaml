@@ -13,6 +13,10 @@ jobs:
         with:
           submodules: recursive
 
+      - name: patched LibreLane image (experiment, not TT-standard)
+        if: hashFiles('.github/nlc_cts_no_insertion_delay') != ''
+        run: bash scripts/ci/librelane_no_insertion_delay.sh
+
       - name: Build GDS
         uses: TinyTapeout/tt-gds-action@ttsky26d
         with:

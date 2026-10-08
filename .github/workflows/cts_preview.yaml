@@ -17,7 +17,6 @@ jobs:
     timeout-minutes: 45
     env:
       LIBRELANE_VERSION: "3.0.14"          # as TinyTapeout/tt-gds-action@ttsky26d
-      LIBRELANE_IMAGE: ghcr.io/librelane/librelane:3.0.14
     steps:
       - name: checkout repo
         uses: actions/checkout@v6
@@ -42,6 +41,13 @@ jobs:
           pip install -r tt/requirements.txt
           pip install librelane==$LIBRELANE_VERSION
           pip install -e ".[sim]"
+
+      - name: LibreLane image
+        run: echo "LIBRELANE_IMAGE=ghcr.io/librelane/librelane:$LIBRELANE_VERSION" >> "$GITHUB_ENV"
+
+      - name: patched LibreLane image (experiment, not TT-standard)
+        if: hashFiles('.github/nlc_cts_no_insertion_delay') != ''
+        run: bash scripts/ci/librelane_no_insertion_delay.sh
 
       - name: LibreLane up to post-CTS repair
         run: |
