@@ -31,6 +31,10 @@
   "//": "https://tinytapeout.com/faq/#how-can-i-map-an-additional-external-clock-to-one-of-the-gpios",
   "CLOCK_PORT": "clk",
 
+  "//": "nlc experiment (docs/results.md F17): clock tree buffers, see branch name",
+  "CTS_ROOT_BUFFER": "sky130_fd_sc_hd__clkbuf_2",
+  "CTS_CLK_BUFFERS": ["sky130_fd_sc_hd__clkbuf_4", "sky130_fd_sc_hd__clkbuf_2", "sky130_fd_sc_hd__clkbuf_1"],
+
   "//": "Configuration docs: https://librelane.readthedocs.io/en/latest/reference/configuration.html",
 
   "//": "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
