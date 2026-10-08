@@ -46,6 +46,7 @@ jobs:
       - name: LibreLane up to post-CTS repair
         run: |
           ./tt/tt_tool.py --create-user-config
+          mkdir -p runs/wokwi                      # as tt_tool.py --harden
           python -m librelane --docker-no-tty --dockerized --run-tag wokwi \
             --force-run-dir runs/wokwi --hide-progress-bar \
             --to OpenROAD.ResizerTimingPostCTS src/config_merged.json
