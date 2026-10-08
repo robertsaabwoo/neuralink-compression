@@ -7,6 +7,9 @@
   python nlc.py sta        timing (synthesises first if there is no netlist)    T-STA-1
   python nlc.py gate_sim   gate-level lossy core + TT top                       T-GL-1/2
   python nlc.py power      gate-level power scenarios + idle                    T-PWR-1
+  python nlc.py layout     routed design from TT's GDS action (fetched with gh if HEAD's is not
+                           in data/gds): real-data power with the clock tree, buffer trees and
+                           slews per RTL signal (reports/latest/layout_fanout.md)  T-PWR-3, T-FAN-1
   python nlc.py all        everything (T2 tier, ~1 h)
   python nlc.py report     print the last report (reports/latest/summary.md)
   python nlc.py accept     accept the current bitstream as the new golden reference (T-CHG-7)
@@ -28,6 +31,7 @@ STEPS = {
     "sta": "sta",
     "gate_sim": "gl",
     "power": "power",
+    "layout": "synth,layout",      # synth: the pre-layout netlist the layout numbers compare to
 }
 NEEDS_NETLIST = {"sta", "gate_sim", "power"}
 

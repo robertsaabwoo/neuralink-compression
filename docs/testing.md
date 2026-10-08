@@ -11,13 +11,14 @@ Quick view of everything from a terminal: `python scripts/status.py`.
 | `python nlc.py algo` | model tests, compression on held-out files, `algo_eval.py` (rate, SNR, generalisation, spikes, max error) | ~10 min (`--quick` 2 min) |
 | `python nlc.py sim` | model, lint, every RTL suite incl. `test/core` (`nlc_core` at the real interface) | ~45 min (`--quick`: T-IF only) |
 | `python nlc.py synth` / `sta` / `gate_sim` / `power` | area / timing / gate level (lossy core + TT top) / power scenarios | 3 / 1 / 10 / 25 min |
+| `python nlc.py layout` | routed design of the last GDS run (`scripts/fetch_gds.py`, needs `gh`): T-PWR-3 real-data power with the clock tree, T-FAN-1 buffer trees/slews (`reports/latest/layout_fanout.md`) | ~10 min |
 | `python nlc.py all` | everything (T2), scored against `scripts/flow/budgets.json` | ~1.5 h |
 | `python nlc.py report` | print `reports/latest/summary.md` | |
 | `python nlc.py accept` | accept the current bitstream as the golden reference (T-CHG-7) | |
 | `pytest` | golden-model unit tests incl. the change guard (host Python) | 30 s |
 | `docker run --rm -v "$PWD:/work" -w /work/test/core nlc-flow make COCOTB_TEST_FILTER=t_if_1` | one cocotb suite or test (also `test/`, `test/lossy`, `test/rans` with `TOP=static/adaptive`) | 0.5-40 min |
 
-`nlc.py` wraps `scripts/check.py` (steps `model lint rtl core synth sta gl power compress algo`,
+`nlc.py` wraps `scripts/check.py` (steps `model lint rtl core synth area sta gl power layout compress algo`,
 `--only`, `--quick`, `--native`, `--update-baseline`). `make` in a cocotb folder cannot take a
 `|` in `COCOTB_TEST_FILTER` (the shell pipes it); use a prefix or a character class.
 
@@ -78,6 +79,7 @@ power scenarios of 4.4 (`test_power_op/n4/worst/floor`), `gl_dump.v` takes `+vcd
 | 2026-10-08 | **intended format change, T-CHG-7 golden accepted:** eager FIFO drain, symbols coded frame by frame, channel by channel, burst in push order (`nlc.lossy.coding_order`) instead of j-major | packet sizes unchanged (synthetic 730/729, lfsr 5510/5445 bytes): only the byte order differs |
 | 2026-10-08 | full check (model, lint, rtl, core, synth, sta, gl, power; 17.8 min with the parallel runner) on eager drain + gated TT top | all pass except T-ROB-5 (test deposited into renamed registers; fixed: it now finds every `nlc_greg`, 189 registers, 3/3 pass); new T-PWR-2 (`t_pwr_op`/`t_pwr_idle`, `nlc_core` gate level): 15.9 / 2.5 uW |
 | 2026-10-08 | D5-D7 implemented (abort/skip/resume, abort token, short frame = abort); lint, rtl, core (10.7 min), replay | **all pass: test/core 48/48, KNOWN_FAIL empty**; lossy 8/8, TT top 4/4, replay 4/4. Gate level / STA not re-run for D5-D7 (functional check only, as asked); `gds` action on the 4x2 tiles is the next hardening check |
+| 2026-10-08 | `layout` on the routed design of `a9c2329` (T-PWR-3, T-FAN-1); `power` re-run on D5-D7 RTL | routed netlist bit-exact on real data through the pins; 80.0 uW op / 51.4 uW idle (pre-layout same scenario 16.8 / 6.0), clock buffers 47.8 / 39.4 uW (F17); 3,283 / 366 slew pins at ss / tt, same as LibreLane (F18); T-PWR-1/2 on D5-D7: lossy 8.30 uW, core 12.5 / 1.07 uW (annotator change verified neutral: identical activity on the same VCD) |
 
 Findings F1-F9, budgets and the measured data: [results.md](results.md).
 
@@ -218,6 +220,8 @@ happens later; the test only tells you which parameter is affected.
 | T-AREA-1 | Yosys area: lossy core, TT top, per module, flops; generator reported separately | C-AREA-1..3 | C-AREA-1..3 | extend (generator split) |
 | T-AREA-2 | Area vs N_SEL sweep (1, 2, 4, 8): fixed cost and per-channel slope; state bits per channel | report | C-AREA-4 | exists (`area` step, N_SEL 2/4/8/16), not run yet |
 | T-PWR-1 | Power matrix at 5 MHz, tt corner (4.4) | C-PWR-1..5 | C-PWR-* | extended: scenarios op/n4/worst/floor + idle; op measured |
+| T-PWR-3 | **Post-layout power**: the routed netlist of the last GDS run (clock tree as CTS built it, repair and hold buffers) simulated through the TT pins on real data at the operating frame rate (128 slots x 2 clocks = 256 clocks/frame, 8 channels, `test/test_power.py`), bytes checked against the model; OpenSTA with the sign-off SDC (propagated clock) and extracted parasitics (nom SPEF). Clock-network nets use raw toggles. Same scenario on our pre-layout TT-top netlist for the difference. Power by cell class: clock buffers, clock gates, flops, repair buffers, hold buffers, logic | C-PWR-1/2 (`layout_power_uw`, `layout_power_idle_uw`) | C-PWR-1/2 | exists (`layout` step) |
+| T-FAN-1 | **Buffer trees and slews per RTL signal** on the routed netlist: every data net with a real driver expanded through the buffers below it (true fanout, buffers, depth, buffer area, cell types), named by the RTL nets upstream of anonymous drivers; worst slew per tree at ss and tt with routed parasitics vs the sign-off max transition; clock tree summary (free-running vs gated buffers, nested gates). `reports/latest/layout_fanout.md` | report; slew violations WARN | C-PWR, C-AREA | exists (`layout` step) |
 | T-SO-1 | TT GDS action: utilisation, setup/hold after CTS, precheck/DRC/LVS/antenna | C-TIM-2/3, C-AREA-3/5 | | new (after push) |
 | T-INF-1 | CI: GitHub `test` (TT) and `ci` (model, RTL) workflows green | green | extended (`model.yml`: TT top + core T-IF); not pushed yet |
 | T-INF-2 | Source-list consistency: `info.yaml`, `test/Makefile`, `LOSSY_SRC` list the same files | identical sets | C-RTL-3 | new |
@@ -239,9 +243,10 @@ Rules: the window must be long enough that power per packet changes by < 5% betw
 (checked and reported). Report a breakdown: flop clock pins, sequential internal,
 combinational, ROM, leakage, plus glitch-inclusive totals (`op_with_glitches`). Report
 energy per sample, power density, and the radio ratio (marked "assumes 10 nJ/bit, unsourced").
-Corners: tt for the budget, ss/ff reported. After the first GDS run, repeat `op` with the
-routed netlist and SPEF parasitics (clock tree included). That number is the sign-off value
-for C-PWR-1.
+Corners: tt for the budget, ss/ff reported. T-PWR-3 repeats `op` and `idle` on the routed
+netlist with SPEF parasitics and the clock tree (`python nlc.py layout`); that number is the
+sign-off value for C-PWR-1. It runs the TT top through the pins, so it includes the pin glue
+(compare with the pre-layout run of the same scenario, not with T-PWR-1/2).
 
 Area: pre-layout Yosys cell area at tt is the working number (T-AREA-1/2). The GDS action's
 utilisation and placement density are the sign-off (T-SO-1).
@@ -267,7 +272,7 @@ Must be hit across the regression (T-ROB-6 plus the directed tests), otherwise t
 | T0 quick | before every commit | `pytest` (incl. T-CHG-1..5, 7), lint, `test/lossy`, `test/` plumbing + lossy (`check.py --only model,lint,rtl --quick`) | < 3 min |
 | T1 CI | every push (GitHub `.github/workflows/model.yml` + TT `test.yaml`) | T0 + rANS suites + replay self-test + T-IF-* + T-INF-2 | < 15 min |
 | T2 full | before a design change is accepted; nightly while iterating | `python scripts/check.py`: everything above + GL + STA + area + power matrix + compression on held-out files + random regression (T-ROB-6, 50 seeds) | < 1 h |
-| T3 sign-off | per GDS run | TT `gds`, `gl_test`, precheck; T-GL-3, post-layout power | TT action |
+| T3 sign-off | per GDS run | TT `gds`, `gl_test`, precheck; then locally `python nlc.py layout` (T-PWR-3, T-FAN-1); T-GL-3 | TT action + ~10 min |
 
 CI rules: A WARN never fails CI; a FAIL does. Every failing randomised test
 prints its seed and a one-line command that reproduces it.
@@ -307,6 +312,6 @@ overflow policy) are reproducible by a named test.
 | C-BW-* | T-BW-1/2, T-ALG-6 |
 | C-TIM-* | T-STA-1, T-GL-2/3, T-SO-1 |
 | C-AREA-* | T-AREA-1/2, T-SO-1 |
-| C-PWR-* | T-PWR-1 (4.4) |
+| C-PWR-* | T-PWR-1 (4.4), T-PWR-2, T-PWR-3, T-FAN-1 |
 | C-ALG-* | T-ALG-2/3/5, T-CHG-3 |
 | C-RTL-* | T-LINT-1, T-GL-1, T-EQ-1, T-INF-2 |

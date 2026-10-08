@@ -8,13 +8,17 @@ Runs inside the nlc-flow Docker image; launch it from the host with scripts/chec
   python scripts/flow/flow.py --quick             compression on 32 held-out files (default 160)
   python scripts/flow/flow.py --update-baseline   store this run as the known-good baseline
 
-Steps: model lint rtl core synth sta gl power compress algo
+Steps: model lint rtl core synth area sta gl power layout compress algo
   core   test/core: nlc_core at the real 256-slot interface (T-IF, T-BW, T-OVF, T-ROB, T-LAT);
          --quick runs T-IF-1/3 only. Tests in KNOWN_FAIL fail on today's RTL on purpose (they
          state a requirement for the design phase): reported, not counted as failures.
   area   lossy core area vs N_SEL (T-AREA-2): fixed cost, per-channel slope, flops per channel
   gl     lossy netlist at 200 ns and at the TT clock (T-GL-1); TT top netlist (T-GL-2)
   power  gate-level scenario sims (docs/testing.md 4.4: op, op4, worst, floor; --quick: op)
+  layout the routed design of TT's GDS action (python scripts/fetch_gds.py first): T-PWR-3
+         real-data power with the clock tree, wires and repair buffers (vs the same scenario
+         on our pre-layout top netlist); T-FAN-1 buffer trees and slews per RTL signal
+         (layout_fanout.md); LibreLane's area by cell class
   algo   scripts/algo_eval.py (T-ALG-2/3/5/7): rate, SNR, generalisation, spikes, max error
 Output: reports/<UTC stamp>/ (logs, netlists, timing/power reports, summary.md, metrics.json),
 mirrored to reports/latest/. Exit status 1 if any budget FAILs.
@@ -39,6 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import netlist as NL  # noqa: E402
 from vcd_activity import activity_tcl  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
@@ -48,7 +53,8 @@ LIB = {"tt": PDK / "lib/sky130_fd_sc_hd__tt_025C_1v80.lib",
        "ss": PDK / "lib/sky130_fd_sc_hd__ss_100C_1v60.lib",
        "ff": PDK / "lib/sky130_fd_sc_hd__ff_n40C_1v95.lib"}
 LOSSY_SRC = ["nlc_lossy.sv", "nlc_lift53.sv", "nlc_rans.sv", "nlc_lossy_rom.v", "nlc_icg.sv"]
-STEPS = ["model", "lint", "rtl", "core", "synth", "area", "sta", "gl", "power", "compress", "algo"]
+STEPS = ["model", "lint", "rtl", "core", "synth", "area", "sta", "gl", "power", "layout",
+         "compress", "algo"]
 AREA_SWEEP = [2, 4, 8, 16]    # N_SEL values for T-AREA-2 (SEL_W >= 1, so no N_SEL = 1)
 # TT top-level tests for modes not in silicon (D1): none since the RTL is lossy only
 PENDING_TESTS: set[str] = set()
@@ -79,6 +85,9 @@ POWER_SCENARIOS = {   # name: (test in test/lossy, VCD start in frames: skip sta
 CORE_POWER_SCENARIOS = {"core_op": ("t_pwr_op", 64), "core_idle": ("t_pwr_idle", 0)}
 
 BUDGETS = json.loads((HERE / "budgets.json").read_text())
+# static timing / power engine: OpenSTA here; in CI (cts_preview workflow) OpenROAD, which runs
+# the same Tcl and can also estimate wire parasitics from a placed database
+STA = os.environ.get("NLC_STA", "sta -no_splash -exit")
 OP = BUDGETS["operating_point"]
 # TT's GDS flow constrains CLOCK_PERIOD from src/config.json (template default 20 ns)
 _cfg = ROOT / "src" / "config.json"
@@ -432,7 +441,7 @@ def step_area(r: Run) -> None:
                        f"(Neuralink: 226 state bits/ch, docs/constraints.md C-AREA-4)")
 
 
-STA = """read_liberty {lib}
+STA_TCL = """read_liberty {lib}
 read_verilog {netlist}
 link_design {top}
 create_clock -name clk -period {period} [get_ports clk]
@@ -445,10 +454,10 @@ exit
 
 
 def _sta(r: Run, netlist: Path, top: str, corner: str, period: float, kind: str, tag: str):
-    tcl = STA.format(lib=LIB[corner], netlist=netlist, top=top, period=period,
+    tcl = STA_TCL.format(lib=LIB[corner], netlist=netlist, top=top, period=period,
                      io=round(0.2 * period, 3), kind=kind)
     (r.out / f"sta_{tag}.tcl").write_text(tcl)
-    _, text = r.sh(f"sta -no_splash -exit {r.out / f'sta_{tag}.tcl'}", f"sta_{tag}.log")
+    _, text = r.sh(f"{STA} {r.out / f'sta_{tag}.tcl'}", f"sta_{tag}.log")
     slacks = [float(s) for s in re.findall(r"^\s*(-?[\d.]+)\s+slack \((?:MET|VIOLATED)\)", text, re.M)]
     return min(slacks) if slacks else None
 
@@ -565,7 +574,7 @@ def _report_power(r: Run, net: Path, top: str, tag: str, activity: str) -> dict:
     tcl = POWER.format(lib=LIB["tt"], netlist=net, top=top, period=OP["clock_period_ns"],
                        activity=activity)
     (r.out / f"power_{tag}.tcl").write_text(tcl)
-    _, text = r.sh(f"sta -no_splash -exit {r.out / f'power_{tag}.tcl'}", f"power_{tag}.log")
+    _, text = r.sh(f"{STA} {r.out / f'power_{tag}.tcl'}", f"power_{tag}.log")
     lost = len(re.findall(r"^Warning \d+: .* not found", text, re.M))
     if lost:
         r.failed_tests.append(f"power {tag}: {lost} activity annotations not applied "
@@ -649,6 +658,334 @@ def step_power(r: Run, quick: bool = False) -> None:
     r.metrics["radio_energy_ratio"] = e_sample_nj / ((10 - bps) * OP["radio_nj_per_bit"])
     r.notes.append("power: pre-CTS (no clock-tree buffers), no wire capacitance, glitch-free "
                    "activity; the routed design will be higher (see op_with_glitches)")
+
+
+# ---------------------------------------------------------------------------
+# layout: the routed design from TT's GDS action (scripts/fetch_gds.py -> data/gds/<sha7>/)
+# ---------------------------------------------------------------------------
+
+GDS = ROOT / "data" / "gds"
+PHYS_LINE = re.compile(r"^\s*sky130_fd_sc_hd__(fill|decap|tapvpwrvgnd)_\d+\s+\S+\s*\(\);\s*$", re.M)
+# T-PWR-3 scenarios (test/test_power.py), VCD start in frames of 256 clocks
+LAYOUT_SCENARIOS = {"op": ("t_pwr3_op", 64), "idle": ("t_pwr3_idle", 0)}
+POWER_VECTORS = ("python scripts/gen_vectors.py --out test/vectors --name power --source real "
+                 "--n-slots 128 --frames 512 --slots 1 20 21 45 64 100 126 127")
+SLEW_TCL = """{design}
+set f [open {out} w]
+foreach p [get_pins *] {{
+  puts $f "[get_full_name $p] [get_property $p slew_max_rise] [get_property $p slew_max_fall]"
+}}
+close $f
+report_checks -path_delay max -digits 3 -format end
+report_checks -path_delay min -digits 3 -format end
+puts "nlc_ws setup"
+report_worst_slack -max -digits 4
+puts "nlc_ws hold"
+report_worst_slack -min -digits 4
+exit
+"""
+LAYOUT_POWER_TCL = """{design}
+set_power_activity -input -activity 0
+source {activity}
+report_power -digits 4
+report_power -instances [get_cells *] -digits 6
+exit
+"""
+
+
+def _gds_dir(r: Run) -> Path | None:
+    latest = GDS / "LATEST"
+    if not latest.exists():
+        r.notes.append("layout: no routed design; run `python scripts/fetch_gds.py` on the host")
+        return None
+    d = GDS / latest.read_text().strip()
+    src = json.loads((d / "source.json").read_text())
+    r.info["layout_source"] = {k: src[k] for k in ("commit", "run_id", "url")}
+    known = os.environ.get("NLC_GDS_MATCHES_SRC")      # from scripts/check.py (git on the host)
+    if known in ("0", "1"):
+        p = subprocess.CompletedProcess([], 1 - int(known), "", "")
+    else:
+        try:
+            p = subprocess.run(["git", "-c", "safe.directory=*", "diff", "--quiet", src["commit"],
+                                "--", "src", "info.yaml"], cwd=ROOT, capture_output=True, text=True)
+        except FileNotFoundError:               # no git in the nlc-flow image
+            p = subprocess.CompletedProcess([], 2, "", "git not installed")
+    if p.returncode == 1:
+        r.notes.append(f"layout: src/ or info.yaml changed since {src['commit'][:7]} (the routed "
+                       "design): numbers are for that commit; push and fetch_gds.py for HEAD")
+    elif p.returncode:
+        r.notes.append(f"layout: could not compare src/ with {src['commit'][:7]} ({p.stderr.strip()})")
+    r.info["layout_matches_src"] = p.returncode == 0
+    return d
+
+
+def _design_tcl(d: Path, lib: Path, net: Path, top: str) -> str:
+    """Load the design with its parasitics: a routed run reads the extracted SPEF; a cts-preview
+    (fetch_gds.py) estimates them from placement in OpenROAD (`NLC_STA` must be openroad), on
+    the routing layers LibreLane uses for sky130 (RT_MIN/MAX_LAYER met1-met4)."""
+    if (d / "nom.spef").exists():
+        return (f"read_liberty {lib}\nread_verilog {net}\nlink_design {top}\n"
+                f"read_sdc {d / 'signoff.sdc'}\nread_spef {d / 'nom.spef'}")
+    return (f"read_db {d / 'design.odb'}\nread_liberty {lib}\nread_sdc {d / 'signoff.sdc'}\n"
+            "set_wire_rc -signal -layers {met1 met2 met3 met4}\n"
+            "set_wire_rc -clock -layers {met1 met2 met3 met4}\n"
+            "estimate_parasitics -placement")
+
+
+def _slews(r: Run, net: Path, top: str, d: Path, corner: str) -> dict[str, float]:
+    """Worst (rise/fall) slew at every pin, layout parasitics, sign-off constraints. Also
+    stores the corner's worst setup/hold slack in r.info["layout_sta_ws"]."""
+    out = r.out / f"layout_slews_{corner}.txt"
+    tcl = SLEW_TCL.format(design=_design_tcl(d, LIB[corner], net, top), out=out)
+    (r.out / f"layout_sta_{corner}.tcl").write_text(tcl)
+    _, text = r.sh(f"{STA} {r.out / f'layout_sta_{corner}.tcl'}", f"layout_sta_{corner}.log")
+    r.info.setdefault("layout_sta_ws", {})[corner] = {
+        k: num(rf"^nlc_ws {k}\s*\nworst slack (-?[\d.]+)", text) for k in ("setup", "hold")}
+    slews = {}
+    if out.exists():
+        for line in out.read_text().splitlines():
+            t = line.split()
+            if len(t) == 3:
+                try:
+                    slews[t[0]] = max(float(t[1]), float(t[2]))
+                except ValueError:
+                    pass
+        out.unlink()
+    return slews
+
+
+def _instance_power(text: str) -> dict[str, float]:
+    """report_power -instances: instance -> total uW."""
+    out = {}
+    for m in re.finditer(r"^\s*([-\d.eE+]+)\s+([-\d.eE+]+)\s+([-\d.eE+]+)\s+([-\d.eE+]+)\s+(\S+)\s*$",
+                         text, re.M):
+        out[m.group(5).lstrip("\\")] = float(m.group(4)) * 1e6
+    return out
+
+
+def _fanout_table(nl, trees, slews: dict[str, dict[str, float]], limit: float, lib, n: int = 25):
+    """Buffer trees of the data nets, worst first (by leaves): what each RTL signal costs."""
+    def pins_of(t):
+        ps = [f"{i}/{p}" for i, p in t.leaves if i]
+        for b in t.buffers:
+            c = nl.cells[b]
+            ps += [f"{b}/{p}" for p in list(c.ins) + list(c.outs)]
+        return ps
+    rows = []
+    for t in sorted(trees.values(), key=lambda t: (-len(t.leaves), -len(t.buffers)))[:n]:
+        ps = pins_of(t)
+        row = {"signal": NL.named_source(nl, t.root), "driver": t.driver,
+               "leaves": len(t.leaves), "buffers": len(t.buffers), "depth": t.depth,
+               "buffer_area_um2": round(sum(lib.area.get(nl.cells[b].type, 0) for b in t.buffers)),
+               "buffer_types": dict(sorted(NL._count(nl.cells[b].type for b in t.buffers).items(),
+                                           key=lambda x: -x[1]))}
+        for corner, s in slews.items():
+            v = [s[p] for p in ps if p in s]
+            row[f"max_slew_{corner}_ns"] = round(max(v), 3) if v else None
+            row[f"slew_violations_{corner}"] = sum(x > limit for x in v)
+        rows.append(row)
+    return rows
+
+
+def _md_table(rows: list[dict], cols: list[str]) -> list[str]:
+    out = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
+    for row in rows:
+        out.append("| " + " | ".join(
+            ", ".join(f"{k} {v}" for k, v in row[c].items()) if isinstance(row[c], dict)
+            else fmt(row[c]) for c in cols) + " |")
+    return out
+
+
+def step_layout(r: Run, quick: bool = False) -> None:
+    """T-PWR-3 + T-FAN-1 on the routed design (docs/testing.md): real-data power with the clock
+    tree CTS built, wire parasitics and repair buffers; buffer trees and slews per RTL signal."""
+    d = _gds_dir(r)
+    if d is None:
+        return
+    src = json.loads((d / "source.json").read_text())
+    top, preview = src["top"], src.get("kind") == "cts-preview"
+    r.info["layout_kind"] = src.get("kind", "routed")
+    net = r.out / "layout_netlist.v"            # without fill/tap/decap (no logic, no ports)
+    net.write_text(PHYS_LINE.sub("", (d / "nl.v").read_text()))
+    lib = NL.read_lib(LIB["tt"])
+    nl = NL.read_netlist(net, lib)
+
+    # --- structure: LibreLane's own numbers, clock tree, buffer trees ---------------------
+    ll = json.loads((d / "metrics.json").read_text())
+    core = ll.get("design__core__area") or 1
+    r.metrics["layout_utilisation"] = ll.get("design__instance__area__stdcell", 0) / core
+    if preview:
+        r.notes.append(f"layout: CTS PREVIEW ({src.get('last_step')}): placed, clock tree built, "
+                       "not routed; wire parasitics estimated from placement, hold slack from "
+                       "our STA after post-CTS repair (routing adds hold buffers later)")
+    r.info["layout_librelane"] = {
+        "core_area_um2": core,
+        "stdcell_area_um2": round(ll.get("design__instance__area__stdcell", 0)),
+        "area_by_class_um2": {k.split(":")[-1]: round(v) for k, v in ll.items()
+                              if k.startswith("design__instance__area__class:")},
+        "setup_ws_ns": ll.get("timing__setup__ws"), "hold_ws_ns": ll.get("timing__hold__ws"),
+        "max_slew_violations": ll.get("design__max_slew_violation__count"),
+        "max_cap_violations": ll.get("design__max_cap_violation__count"),
+        "max_fanout_violations": ll.get("design__max_fanout_violation__count"),
+        "wirelength_um": ll.get("route__wirelength")}
+    # a preview's hold metric is from before the post-CTS repair: replaced by our STA below
+    r.metrics["layout_hold_slack_ns"] = None if preview else ll.get("timing__hold__ws")
+    r.info["layout_area_by_class_um2"] = NL.class_area(nl, lib)
+    r.info["layout_hold_buffers"] = sum(NL.cell_class(nl, c) == "hold_buffer"
+                                        for c in nl.cells.values())
+    roots = NL.clock_roots(nl, lib)
+    clock = NL.clock_tree_summary(nl, lib, roots)
+    r.info["layout_clock_tree"] = clock
+    if (d / "cts.rpt").exists():                 # OpenROAD's own CTS summary
+        cts = (d / "cts.rpt").read_text()
+        used, _, dummies = cts.partition("Dummys used:")
+        cells = r"sky130_fd_sc_hd__(\w+):\s*(\d+)"
+        r.info["layout_cts_report"] = {
+            "clock_roots": num(r"Clock Roots:\s*(\d+)", cts),
+            "buffers_inserted": num(r"Buffers Inserted:\s*(\d+)", cts),
+            "sinks": num(r"number of Sinks:\s*(\d+)", cts),
+            "cells": {c: int(n) for c, n in re.findall(cells, used)},
+            "dummies": {c: int(n) for c, n in re.findall(cells, dummies)}}
+    trees = NL.trees(nl)
+    buffered = [t for t in trees.values() if t.buffers]
+    r.info["layout_buffer_trees"] = {
+        "trees": len(buffered), "buffers": sum(len(t.buffers) for t in buffered),
+        "buffer_area_um2": round(sum(lib.area.get(nl.cells[b].type, 0)
+                                     for t in buffered for b in t.buffers))}
+
+    # --- slews with routed parasitics (T-FAN-1) -------------------------------------------
+    limit = num(r"set_max_transition\s+([\d.]+)", (d / "signoff.sdc").read_text(), default=0.75)
+    slews = {c: _slews(r, net, top, d, c) for c in ("ss", "tt", "ff")}
+    holds = [v["hold"] for v in r.info.get("layout_sta_ws", {}).values() if v["hold"] is not None]
+    if r.metrics["layout_hold_slack_ns"] is None and holds:
+        r.metrics["layout_hold_slack_ns"] = min(holds)
+    clock_pins = {f"{c.inst}/{p}" for c in nl.cells.values()
+                  for p, n in (c.ins | c.outs).items() if n in nl.clock_nets}
+    for c, s in slews.items():
+        ck = [v for p, v in s.items() if p in clock_pins]
+        r.metrics[f"layout_slew_violations_{c}"] = sum(v > limit for v in s.values())
+        r.info[f"layout_max_slew_{c}_ns"] = round(max(s.values()), 3) if s else None
+        r.info[f"layout_clock_max_slew_{c}_ns"] = round(max(ck), 3) if ck else None
+    rows = _fanout_table(nl, trees, slews, limit, lib)
+    worst = sorted(trees.values(), key=lambda t: -max(
+        (slews["ss"].get(f"{i}/{p}", 0) for i, p in t.leaves if i), default=0))[:10]
+    slow = _fanout_table(nl, {t.root: t for t in worst}, slews, limit, lib, n=10)
+    slow.sort(key=lambda x: -(x["max_slew_ss_ns"] or 0))
+    r.info["layout_fanout_top"] = rows[:10]
+    cols = ["signal", "driver", "leaves", "buffers", "depth", "buffer_area_um2", "buffer_types",
+            "max_slew_ss_ns", "slew_violations_ss", "max_slew_tt_ns", "slew_violations_tt"]
+    md = [f"# Buffer trees of the routed design ({d.name}, slew limit {limit} ns)", "",
+          "Every data net with a real driver, expanded through the buffers the resizer put "
+          "below it. `signal`: the net, or for an anonymous net the RTL-named nets upstream of "
+          "its driver. `leaves`: real sinks. Slews: worst rise/fall over the tree's pins, routed "
+          "parasitics (nom SPEF), sign-off constraints.", "", "## Highest fanout", ""]
+    md += _md_table(rows, cols)
+    md += ["", "## Slowest (worst slew at a leaf, ss)", ""] + _md_table(slow, cols)
+    md += ["", "## Clock tree", "", "```json", json.dumps(clock, indent=2), "```", ""]
+
+    # --- real-data power of the routed netlist vs our pre-layout netlist (T-PWR-3) ----------
+    r.sh(POWER_VECTORS, "layout_vectors.log")
+    vcfg = ROOT / "test/vectors/power/config.json"
+    r.info["layout_power_data"] = json.loads(vcfg.read_text()).get("source") if vcfg.exists() else None
+    if r.info["layout_power_data"] != "real":
+        r.notes.append("layout: power scenario on SYNTHETIC data (data/raw missing): compare "
+                       "only with runs on synthetic data")
+    period = OP["clock_period_ns"]
+    names = ["op"] if quick else list(LAYOUT_SCENARIOS)
+    variants = [("layout", net)]
+    pre = r.out / "top_netlist.v"
+    if pre.exists():
+        variants.append(("prelayout", pre))
+    power: dict[str, dict] = {}
+    inst_power: dict[str, dict[str, float]] = {}
+    for tag, netlist in variants:
+        jobs = []
+        for name in names:
+            test, start = LAYOUT_SCENARIOS[name]
+            vcd = r.out / f"{tag}_{name}.vcd"
+            jobs.append((name, f"{test}$", f"PLUSARGS='+vcd={vcd} "
+                         f"+vcd_start={int(start * 256 * period)}'"))
+        res = cocotb_jobs(r, ROOT / "test", f"gl_{tag}",
+                          f"GATES=local NETLIST={netlist} FST= COCOTB_TEST_MODULES=test_power "
+                          f"CLK_NS={period}", jobs)
+        for name in names:
+            vcd = r.out / f"{tag}_{name}.vcd"
+            if not (res.get(name) and all(o for _, o in res[name])):
+                r.failed_tests.append(f"{tag} netlist, power scenario {name}: bytes differ from "
+                                      f"the model or no output (see gl_{tag}/)")
+                continue
+            if not vcd.exists():
+                continue
+            act_f, act_r = r.out / f"activity_{tag}_{name}.tcl", r.out / f"activity_{tag}_{name}_raw.tcl"
+            r.info[f"activity_annotation_{tag}_{name}"] = activity_tcl(netlist, vcd, LIB["tt"],
+                                                                       act_f, act_r)
+            vcd.unlink()
+            if tag == "layout":
+                design = _design_tcl(d, LIB["tt"], netlist, top)
+                cnl = nl
+            else:
+                design = (f"read_liberty {LIB['tt']}\nread_verilog {netlist}\nlink_design {top}\n"
+                          f"create_clock -name clk -period {period} [get_ports clk]")
+                cnl = NL.read_netlist(netlist, lib)
+            tcl = LAYOUT_POWER_TCL.format(design=design, activity=act_f)
+            (r.out / f"power_{tag}_{name}.tcl").write_text(tcl)
+            _, text = r.sh(f"{STA} {r.out / f'power_{tag}_{name}.tcl'}",
+                           f"power_{tag}_{name}.log")
+            lost = len(re.findall(r"^Warning \d+: .* not found", text, re.M))
+            if lost:
+                r.failed_tests.append(f"power {tag} {name}: {lost} activity annotations not "
+                                      f"applied (see power_{tag}_{name}.log)")
+            groups = _power(text)
+            by_class: dict[str, float] = {}
+            inst_power[f"{tag}_{name}"] = _instance_power(text)
+            for inst, p in inst_power[f"{tag}_{name}"].items():
+                c = cnl.cells.get(inst)
+                k = NL.cell_class(cnl, c) if c else "other"
+                by_class[k] = by_class.get(k, 0.0) + p
+            power[f"{tag}_{name}"] = {
+                "total_uw": round(groups.get("Total", {}).get("total", 0), 3),
+                "by_group_uw": {g: round(v["total"], 3) for g, v in groups.items() if v["total"]},
+                "by_cell_class_uw": {k: round(v, 3) for k, v in sorted(by_class.items())}}
+    r.info["layout_power"] = power
+    for name, metric in [("op", "layout_power_uw"), ("idle", "layout_power_idle_uw")]:
+        p = power.get(f"layout_{name}")
+        if p:
+            r.metrics[metric] = p["total_uw"]
+            cls = p["by_cell_class_uw"]
+            r.info[f"layout_clock_power_{name}_uw"] = round(
+                cls.get("clock_buffer", 0) + cls.get("clock_gate", 0)
+                + cls.get("clock_dummy_load", 0), 3)
+    if "layout_op" in power and "prelayout_op" in power:
+        r.info["layout_minus_prelayout_op_uw"] = round(
+            power["layout_op"]["total_uw"] - power["prelayout_op"]["total_uw"], 3)
+
+    # --- clock roots: what each gate's subtree costs (its buffers + the gate itself) --------
+    root_rows = []
+    for rt in roots:
+        cells = rt["buffers"] + ([rt["driver"]] if rt["driver"] in nl.cells else [])
+        row = {k: rt[k] for k in ("root", "enable", "flops", "child_gates", "depth",
+                                  "delay_buffers", "dummy_loads", "buffer_area_um2",
+                                  "buffer_types")}
+        row["buffers"] = len(rt["buffers"])
+        for name in names:
+            ip = inst_power.get(f"layout_{name}", {})
+            row[f"{name}_uw"] = round(sum(ip.get(c, 0.0) for c in cells), 3) if ip else None
+        root_rows.append(row)
+    root_rows.sort(key=lambda x: -(x.get("op_uw") or 0))
+    r.info["layout_clock_roots_top"] = root_rows[:5]
+    rcols = ["root", "enable", "flops", "child_gates", "buffers", "depth", "delay_buffers",
+             "dummy_loads", "buffer_area_um2", "buffer_types"] + [f"{n}_uw" for n in names]
+    md += ["## Clock roots (port and every clock gate), by running power", "",
+           "Power: the root's clock buffers plus its gate, real-data scenario (T-PWR-3). "
+           "Delay buffers: CTS latency balancing. Dummy loads: CTS capacitance balancing.", ""]
+    md += _md_table(root_rows[:30], rcols)
+    (r.out / "layout_fanout.md").write_text("\n".join(md) + "\n")
+    (r.out / "layout_fanout.json").write_text(json.dumps(
+        {"limit_ns": limit, "top": rows, "slowest": slow, "clock": clock,
+         "clock_roots": root_rows}, indent=2))
+    r.notes.append("layout: T-PWR-3 runs the TT top through the pins (128 slots x 2 clocks = "
+                   "real frame rate), so it includes the pin glue; clock-tree nets use raw "
+                   "toggles of the unit-delay simulation, data nets glitch-free sampling")
 
 
 def step_compress(r: Run, quick: bool) -> None:
@@ -815,6 +1152,7 @@ def main() -> None:
            "core": lambda run: step_core(run, args.quick), "synth": step_synth,
            "area": step_area,
            "sta": step_sta, "gl": step_gl, "power": lambda run: step_power(run, args.quick),
+           "layout": lambda run: step_layout(run, args.quick),
            "compress": lambda run: step_compress(run, args.quick),
            "algo": lambda run: step_algo(run, args.quick)}
     # compression first: power uses bits/sample for the radio comparison

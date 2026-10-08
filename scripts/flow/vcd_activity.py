@@ -1,34 +1,26 @@
 """Per-pin switching activity from a gate-level VCD, as OpenSTA `set_power_activity` commands.
 
 OpenSTA's read_vcd annotates pins, so it needs every cell's ports in the VCD; we
-dump only the netlist's top-level nets (test/lossy/gl_dump.v) and map each net
-to the cell output pin (or input port) that drives it.
+dump only the netlist's top-level nets (test/lossy/gl_dump.v, test/core/gl_dump.v, test/tb.v
++vcd) and map each net to the cell output pin (or input port) that drives it.
 
 Two activities per net, both in transitions per clock cycle (OpenSTA's -activity):
   functional  value sampled at every rising clock edge: glitch-free, what a
               zero-delay simulation sees (the budgeted number)
   raw         every transition in the VCD, including the glitches produced by
               the unit-delay (#1 per cell) gate models: an upper-bound-ish view
-Duty = fraction of clock edges at which the net is 1.
+Clock-network nets (netlist.clock_network: the port, clock buffers, clock gate outputs) always
+use raw transitions: their pulses are real, and sampling at the clock edge would see them
+constant (free clock power). Duty = fraction of clock edges at which the net is 1.
 """
 
 from __future__ import annotations
 
-import re
+import sys
 from pathlib import Path
 
-CELL_RE = re.compile(r"^\s*(sky130_fd_sc_hd__\w+)\s+(\S+)\s*\((.*?)\);", re.S | re.M)
-CONN_RE = re.compile(r"\.(\w+)\(([^()]*)\)")
-LIB_CELL_RE = re.compile(r'^\s*cell\s*\(\s*"?(\w+)"?\s*\)', re.M)
-LIB_OUT_RE = re.compile(r'pin\s*\(\s*"?(\w+)"?\s*\)\s*\{[^{}]*?direction\s*:\s*"?output"?')
-PORT_RE = re.compile(r"^\s*input\s+(?:wire\s+)?(?:\[(\d+):(\d+)\]\s*)?(\w+)\s*;", re.M)
-
-
-def lib_output_pins(lib_path: Path) -> dict[str, set[str]]:
-    text = lib_path.read_text()
-    starts = [(m.start(), m.group(1)) for m in LIB_CELL_RE.finditer(text)] + [(len(text), "")]
-    return {name: set(LIB_OUT_RE.findall(text[a:b]))
-            for (a, name), (b, _) in zip(starts, starts[1:])}
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from netlist import read_lib, read_netlist  # noqa: E402
 
 
 def parse_vcd(path: Path, clock: str = "clk"):
@@ -107,7 +99,7 @@ def parse_vcd(path: Path, clock: str = "clk"):
     out = {}
     for ident, names in bits.items():
         for name, k in names:
-            out[name] = (func[ident][k], raw[ident][k], high[ident][k])
+            out[name.lstrip("\\")] = (func[ident][k], raw[ident][k], high[ident][k])
     return out, edges
 
 
@@ -117,8 +109,7 @@ def activity_tcl(netlist: Path, vcd: Path, lib: Path, out_func: Path, out_raw: P
     stats, edges = parse_vcd(vcd, clock)
     if edges == 0:
         raise ValueError(f"{vcd}: no rising edges on {clock}")
-    outs = lib_output_pins(lib)
-    text = netlist.read_text()
+    nl = read_netlist(netlist, read_lib(lib), clock)
     func, raw = [], []
 
     def emit(target: str, s: tuple[int, int, int]) -> None:
@@ -126,31 +117,28 @@ def activity_tcl(netlist: Path, vcd: Path, lib: Path, out_func: Path, out_raw: P
         func.append(f"set_power_activity {target} -activity {s[0] / edges:.6g} -duty {duty:.4g}")
         raw.append(f"set_power_activity {target} -activity {s[1] / edges:.6g} -duty {duty:.4g}")
 
-    driven = missing = 0
-    for cell, inst, conns in CELL_RE.findall(text):
-        for pin, net in CONN_RE.findall(conns):
-            net = net.strip()
-            if pin not in outs.get(cell, ()) or not net or "'" in net:
-                continue
+    driven = missing = clock_pins = 0
+    clock_toggles = 0
+    for c in nl.cells.values():
+        for pin, net in c.outs.items():
             driven += 1
-            s = stats.get(net.lstrip("\\"))
+            s = stats.get(net)
             if s is None:
                 missing += 1
                 continue
-            if "dlclkp" in cell:
-                # gated clock: its pulses are real transitions, not glitches, and
-                # sampling at clk edges would see it constant (free clock power)
-                s = (s[1], s[1], s[1] // 4)
-            emit(f"-pins [get_pins {{{inst}/{pin}}}]", s)
-    for hi, lo, name in PORT_RE.findall(text):
-        if name == clock:
-            continue
-        for b in ([name] if not hi else [f"{name}[{i}]" for i in range(int(lo), int(hi) + 1)]):
-            if b in stats:
-                emit(f"-input_ports [get_ports {{{b}}}]", stats[b])
+            if net in nl.clock_nets:
+                s = (s[1], s[1], s[1] // 4)      # duty ~0.5 for a free-running clock
+                clock_pins += 1
+                clock_toggles += s[1]
+            emit(f"-pins [get_pins {{{c.inst}/{pin}}}]", s)
+    for b in nl.inputs:
+        if b != clock and b in stats:
+            emit(f"-input_ports [get_ports {{{b}}}]", stats[b])
     out_func.write_text("\n".join(func) + "\n")
     out_raw.write_text("\n".join(raw) + "\n")
     f_tot = sum(s[0] for s in stats.values())
     r_tot = sum(s[1] for s in stats.values())
     return {"clock_edges": edges, "driven_pins": driven, "unannotated_pins": missing,
+            "clock_net_pins": clock_pins,
+            "clock_net_toggles_per_cycle": round(clock_toggles / edges, 2),
             "glitch_factor": round(r_tot / f_tot, 2) if f_tot else None}

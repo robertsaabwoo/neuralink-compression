@@ -1,0 +1,83 @@
+# CTS preview (~10-15 min): TT's LibreLane flow stopped after clock-tree synthesis and the
+# post-CTS timing repair (OpenROAD.ResizerTimingPostCTS), then our layout step (T-PWR-3,
+# T-FAN-1) on that netlist with wire parasitics estimated from placement. Detailed routing
+# (~63 of the gds workflow's ~80 min) does not change the clock tree, so this screens clock-tree
+# and RTL experiments; the gds workflow stays the sign-off. docs/testing.md T-PWR-3,
+# docs/results.md F17. Results: job summary; artifacts cts_preview (python scripts/fetch_gds.py
+# --preview) and cts_preview_report (reports/latest).
+name: cts_preview
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  preview:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      LIBRELANE_VERSION: "3.0.14"          # as TinyTapeout/tt-gds-action@ttsky26d
+      LIBRELANE_IMAGE: ghcr.io/librelane/librelane:3.0.14
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: checkout tt-support-tools
+        uses: actions/checkout@v6
+        with:
+          repository: TinyTapeout/tt-support-tools
+          ref: main
+          path: tt
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: install tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y iverilog
+          pip install -r tt/requirements.txt
+          pip install librelane==$LIBRELANE_VERSION
+          pip install -e ".[sim]"
+
+      - name: LibreLane up to post-CTS repair
+        run: |
+          ./tt/tt_tool.py --create-user-config
+          python -m librelane --docker-no-tty --dockerized --run-tag wokwi \
+            --force-run-dir runs/wokwi --hide-progress-bar \
+            --to OpenROAD.ResizerTimingPostCTS src/config_merged.json
+
+      - name: pack
+        run: python scripts/fetch_gds.py --pack runs/wokwi
+
+      - name: layout step (power, clock tree, fanout, hold)
+        run: |
+          PDK_DIR=$(python -c "import json; print(json.load(open('runs/wokwi/resolved.json'))['PDK_ROOT'])")
+          export NLC_PDK="$PDK_DIR/sky130A/libs.ref/sky130_fd_sc_hd"
+          export NLC_STA="$GITHUB_WORKSPACE/scripts/ci/openroad.sh"
+          export NLC_GDS_MATCHES_SRC=1 NLC_JOBS=2
+          chmod +x scripts/ci/openroad.sh
+          python scripts/flow/flow.py --only layout || true    # FAILs on power budgets by design
+          python scripts/ci/preview_summary.py >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload preview design
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cts_preview
+          path: data/gds/*-cts/
+          if-no-files-found: warn
+
+      - name: upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cts_preview_report
+          path: |
+            reports/latest/
+            !reports/latest/*.vcd
+            runs/wokwi/*-openroad-cts/
+          if-no-files-found: warn

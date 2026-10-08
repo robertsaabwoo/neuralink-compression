@@ -102,6 +102,20 @@
       "unit": "uW",
       "why": "C-PWR-2 at system level: nlc_core configured, enable = 0, ADC stream running (T-PWR-2)"
     },
+    "layout_power_uw": {
+      "limit": 40,
+      "target": 16,
+      "cmp": "<=",
+      "unit": "uW",
+      "why": "T-PWR-3: routed TT design (clock tree, wires, repair buffers, pin glue) on real data at the operating frame rate; same budget as C-PWR-1 (docs/budgets.md)"
+    },
+    "layout_power_idle_uw": {
+      "limit": 10,
+      "target": 2,
+      "cmp": "<=",
+      "unit": "uW",
+      "why": "T-PWR-3 idle: routed design, enable = 0, ADC strobes running (C-PWR-2)"
+    },
     "power_worst_uw": {
       "limit": 40.0,
       "target": 40.0,
@@ -157,6 +171,34 @@
       "cmp": "<=",
       "unit": "bins",
       "why": "docs/testing.md 4.5: functional coverage bins not hit by the test/core regression (WARN only); list in the details"
+    },
+    "layout_utilisation": {
+      "limit": 0.85,
+      "target": 0.6,
+      "cmp": "<=",
+      "unit": "",
+      "why": "LibreLane stdcell area (incl. clock tree, repair/hold buffers, taps) / core area of the routed design; TT's placement density target is 60%, routing gets hard past ~80%"
+    },
+    "layout_hold_slack_ns": {
+      "limit": 0.0,
+      "target": 0.05,
+      "cmp": ">=",
+      "unit": "ns",
+      "why": "LibreLane worst hold slack over all corners of the routed design; clock-tree changes (F17) trade clock buffers against hold margin and hold buffers"
+    },
+    "layout_slew_violations_ss": {
+      "limit": 100000,
+      "target": 0,
+      "cmp": "<=",
+      "unit": "pins",
+      "why": "T-FAN-1: pins over the sign-off max transition (0.75 ns) at ss with routed parasitics; not a TT precheck failure, but slow edges cost short-circuit power and hide high-fanout nets (layout_fanout.md)"
+    },
+    "layout_slew_violations_tt": {
+      "limit": 100000,
+      "target": 0,
+      "cmp": "<=",
+      "unit": "pins",
+      "why": "T-FAN-1 at tt"
     }
   },
   "baseline": {

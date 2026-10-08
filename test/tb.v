@@ -4,10 +4,21 @@
 // Tiny Tapeout template testbench plus named wires for the cocotb harness.
 module tb ();
 
+  // +vcd=<file> [+vcd_start=<ns>]: instead of tb.fst, dump only the design's top-level nets
+  // (every net of a flat gate-level netlist) for activity-based power (flow.py step layout)
+  reg [8*512-1:0] vcd_file;
+  reg [63:0]      vcd_start;
   initial begin
-    $dumpfile("tb.fst");
-    $dumpvars(0, tb);
-    #1;
+    if ($value$plusargs("vcd=%s", vcd_file)) begin
+      if (!$value$plusargs("vcd_start=%d", vcd_start)) vcd_start = 0;
+      #(vcd_start);
+      $dumpfile(vcd_file);
+      $dumpvars(1, user_project);
+    end else begin
+      $dumpfile("tb.fst");
+      $dumpvars(0, tb);
+      #1;
+    end
   end
 
   reg clk;
