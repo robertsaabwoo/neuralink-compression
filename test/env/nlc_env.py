@@ -7,12 +7,16 @@ taken when m_valid and m_ready are both 1 at that sample.
 
   ADC mux    one slot per clock, n_slots per frame, s_frame on slot 0, never waits. Runs from
              reset with random filler; play() inserts data frames at the next frame boundary
-             after the config queue is empty. Frame lengths can be faulted (frame_lens).
+             after the config queue is empty. Faults (frame_faults): ("short", n) s_frame after
+             n slots, ("long", n) n slots, ("missing",) no s_frame between two frames.
   config     writes through nlc_core's cfg port, one per clock (configure(), write()).
   host       m_ready per clock: turnaround (clocks per byte), random p_ready, stall windows.
-  scoreboard splits bytes on m_last; checks header and seq; compares each packet with
-             LossyCodec on the frames it covers (by seq, so expected losses are allowed);
-             decodes; SNR and bits/sample.
+             Resets with the chip (rst_n drops any partial packet it holds).
+  scoreboard splits bytes on m_last; an abort token (m_abort, D6/D7) discards the partial
+             packet. Expected packet k = LossyCodec on frames [k*fpp, (k+1)*fpp) of the frames
+             actually driven since enable, selected by the frame rule of model/nlc/adc.py (D5),
+             so frame faults are checked bit-exact. By seq, so lost packets are allowed when the
+             test expects them. Decodes; SNR and bits/sample.
   monitors   RTL only (needs u_enc.u_lossy): latency, bandwidth, FIFO occupancy, coverage.
   report     write_report() -> JSON in $NLC_RESULTS (default test/results/<suite>).
 
@@ -37,6 +41,7 @@ from cocotb.triggers import ClockCycles, FallingEdge, ReadOnly
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "model"))
 from nlc import stimgen  # noqa: E402
+from nlc.adc import selected_stream  # noqa: E402
 from nlc.data import load_challenge, synthetic  # noqa: E402
 from nlc.lossy import LossyCodec, LossyConfig, default_tables, stream_coeffs  # noqa: E402
 from nlc.packet import decode_header, decode_packet, encode_stream  # noqa: E402
@@ -176,32 +181,59 @@ class Host:
 # ---------------------------------------------------------------------------
 
 class Segment:
-    """Packets expected from one enable period: frames played from the first frame after
-    enable. Packet k covers frames [k*fpp, (k+1)*fpp) of the selected slots."""
+    """One enable period: every frame driven from the first frame of play() until disable or
+    reset (played data, then filler: the RTL codes both). Packet k covers frames
+    [k*fpp, (k+1)*fpp) of the selected stream (frame rule D5)."""
 
-    def __init__(self, x_sel: np.ndarray, first_clock: int, n_slots: int, slots: list[int]):
-        self.x = x_sel
+    def __init__(self, first_clock: int, n_slots: int, slots: list[int], n_played: int):
         self.slots = slots
         self.first_clock = first_clock      # clock of slot 0 of frame 0
         self.n_slots = n_slots
+        self.n_played = n_played            # data frames queued by play()
         self.codec = codec()
-        self.expected = encode_stream(x_sel, self.codec)
+        self.fpp = self.codec.cfg.frames_per_packet
+        self.frames: list[np.ndarray] = []
+        self.frame_clock: list[int] = []
+        self.closed = False
+        self._x: np.ndarray | None = None
+        self._exp: dict[int, bytes] = {}
         self.next = 0
         self.got: dict[int, bytes] = {}
         self.got_clock: dict[int, int] = {}
         self.lost: list[int] = []
+        self.aborted: list[tuple[int, int | None]] = []   # (clock, seq in the partial header)
+
+    def add_frame(self, row: np.ndarray, clock: int) -> None:
+        if not self.closed:
+            self.frames.append(row)
+            self.frame_clock.append(clock)
+            self._x = None
+
+    @property
+    def x(self) -> np.ndarray:
+        if self._x is None:
+            self._x = selected_stream(self.frames, self.slots)
+        return self._x
+
+    def expected(self, k: int) -> bytes | None:
+        """Packet k from the model (packets are independent), None if not all frames driven."""
+        if k not in self._exp:
+            x = self.x[k * self.fpp:(k + 1) * self.fpp]
+            if len(x) < self.fpp:
+                return None
+            p = encode_stream(x, self.codec)[0]
+            self._exp[k] = bytes([p[0] & 0xC0 | k & 63]) + p[1:]
+        return self._exp[k]
 
 
 class Scoreboard:
-    """allow_loss: seq gaps are recorded as lost packets, not errors (overflow tests).
-    grace: mismatches in the first `grace` packets of a segment are notes, not errors.
-    resync: on a mismatch, look for the packet at a frame offset of up to +-resync frames
-    (frame-length faults shift the stream); a match there is a note."""
+    """allow_loss: seq gaps are lost packets, not errors (overflow tests, D6).
+    allow_abort: abort tokens are expected (overflow, disable mid-packet), not errors."""
 
-    def __init__(self, allow_loss: bool = False, grace: int = 0, resync: int = 0) -> None:
-        self.allow_loss = allow_loss
-        self.grace, self.resync = grace, resync
+    def __init__(self, allow_loss: bool = False, allow_abort: bool = False) -> None:
+        self.allow_loss, self.allow_abort = allow_loss, allow_abort
         self.notes: list[str] = []
+        self.aborts = 0
         self.segments: list[Segment] = []
         self.errors: list[str] = []
         self.packets = 0
@@ -231,49 +263,43 @@ class Scoreboard:
                 seg.lost += list(range(k, k + gap))
                 k += gap
         seg.next = k + 1
-        if k >= len(seg.expected):              # filler after the played data: not checked
-            self.extra += 1
+        exp = seg.expected(k)
+        if exp is None:
+            self.errors.append(f"packet {k} arrived before its frames were driven")
             return
+        if k * seg.fpp >= seg.n_played:         # filler after the played data: checked too
+            self.extra += 1
         seg.got[k], seg.got_clock[k] = pkt, clock
-        exp = seg.expected[k]
         if pkt != exp:
             i = next((i for i, (a, b) in enumerate(zip(pkt, exp)) if a != b), min(len(pkt), len(exp)))
-            msg = f"packet {k}: first difference at byte {i} (got {len(pkt)} bytes, expected {len(exp)})"
-            o = self._offset(seg, k, pkt)
-            if o is not None:
-                self.notes.append(f"packet {k}: matches the model at a frame offset of {o:+d}")
-            elif k < self.grace:
-                self.notes.append(msg + " (grace)")
-            else:
-                self.errors.append(msg)
+            self.errors.append(f"packet {k}: first difference at byte {i} (got {len(pkt)} bytes, "
+                               f"expected {len(exp)})")
             return
         try:
             _, y = decode_packet(pkt, seg.codec, len(seg.slots))
         except Exception as e:  # noqa: BLE001  decoder raises on any malformed packet
             self.errors.append(f"packet {k}: does not decode ({e})")
             return
-        fpp = seg.codec.cfg.frames_per_packet
-        ref = seg.x[k * fpp:(k + 1) * fpp]
+        ref = seg.x[k * seg.fpp:(k + 1) * seg.fpp]
         if y.shape != ref.shape:
             self.errors.append(f"packet {k}: decoded shape {y.shape}, expected {ref.shape}")
 
-    def _offset(self, seg: Segment, k: int, pkt: bytes) -> int | None:
-        fpp = seg.codec.cfg.frames_per_packet
-        for o in sorted(range(-self.resync, self.resync + 1), key=abs):
-            t0 = k * fpp + o
-            if o == 0 or t0 < 0 or t0 + fpp > len(seg.x):
-                continue
-            p = encode_stream(seg.x[t0:t0 + fpp], seg.codec)[0]
-            if bytes([p[0] & 0xC0 | k & 63]) + p[1:] == pkt:
-                return o
-        return None
+    def on_abort(self, partial: bytes, clock: int) -> None:
+        """Abort token: the host discards the partial packet (D6/D7)."""
+        self.aborts += 1
+        seq = decode_header(partial[0])[1] if partial else None
+        if self.seg is not None:
+            self.seg.aborted.append((clock, seq))
+        msg = f"abort at clock {clock} after {len(partial)} bytes (header seq {seq})"
+        (self.notes if self.allow_abort else self.errors).append(
+            msg if self.allow_abort else "unexpected " + msg)
 
     def quality(self) -> dict:
         err = sig = bits = n = 0.0
         for seg in self.segments:
             fpp = seg.codec.cfg.frames_per_packet
             for k, pkt in seg.got.items():
-                if pkt != seg.expected[k]:
+                if pkt != seg.expected(k):
                     continue
                 _, y = decode_packet(pkt, seg.codec, len(seg.slots))
                 ref = seg.x[k * fpp:(k + 1) * fpp].astype(float)
@@ -299,11 +325,13 @@ def _int(sig, default: int = -1) -> int:
 class NlcEnv:
     def __init__(self, dut, name: str, *, host: Host | None = None, n_slots: int = N_SLOTS,
                  clk_ns: float = CLK_NS, monitors: bool = True, allow_loss: bool = False,
-                 grace: int = 0, resync: int = 0, seed: int = 0) -> None:
+                 allow_abort: bool = False, seed: int = 0) -> None:
         self.dut, self.name = dut, name
         self.host = host or Host()
         self.n_slots, self.clk_ns = n_slots, clk_ns
-        self.sb = Scoreboard(allow_loss, grace, resync)
+        self.sb = Scoreboard(allow_loss, allow_abort)
+        # abort token output (D6/D7); today's RTL has none: aborts are then invisible
+        self.has_abort = hasattr(dut, "m_abort")
         self._task = None
         self.rng = np.random.default_rng(seed)
         self.clock = 0
@@ -314,12 +342,10 @@ class NlcEnv:
         # ADC
         self.frame: np.ndarray = self._filler()
         self.slot = 0
-        self.frame_lens: deque[int] = deque()   # fault injection: next frames' lengths
+        self.frame_faults: deque[tuple] = deque()   # fault injection, see module docstring
         self.play_q: deque[np.ndarray] = deque()
         self.pending_seg: tuple | None = None
         self.adc_frame = 0                      # ADC frames started (all, incl. filler)
-        self.data_frame = -1                    # index into the current segment, -1 = filler
-        self.data_frame_clock: dict[int, int] = {}
         # host side
         self.rx = bytearray()
         self.rx_first_clock = 0
@@ -366,13 +392,21 @@ class NlcEnv:
         return False
 
     async def reset(self, clocks: int = 3) -> None:
-        """Pulse rst_n (synchronous) from the main loop's point of view."""
+        """Pulse rst_n (D7). The host resets with the chip: it drops any partial packet.
+        Checks that the output is empty right after reset."""
         await FallingEdge(self.dut.clk)
         self.dut.rst_n.value = 0
         await ClockCycles(self.dut.clk, clocks, rising=False)
         self.dut.rst_n.value = 1
+        await ReadOnly()
+        if _int(self.dut.m_valid, 0):
+            self.sb.errors.append(f"m_valid = 1 right after rst_n (clock {self.clock})")
         self.enabled = False
         self.cfg_q.clear()
+        self.rx.clear()
+        if self.sb.seg is not None:
+            self.sb.seg.closed = True
+        self.mon.new_run()
 
     def write(self, addr: int, data: int) -> None:
         self.cfg_q.append((addr, data))
@@ -402,7 +436,13 @@ class NlcEnv:
         """Queue ADC frames (n_frames, n_slots). They start at the first frame boundary after
         the config queue drains, which is frame 0 of a new scoreboard segment."""
         self.play_q.extend(rows)
-        self.pending_seg = (rows[:, self.slots].copy(), self.slots)
+        self.pending_seg = (len(rows), self.slots)
+
+    @property
+    def data_frame(self) -> int:
+        """Frame index in the current segment (-1 before its first frame)."""
+        seg = self.sb.seg
+        return len(seg.frames) - 1 if seg is not None and not seg.closed else -1
 
     def play_queue_clear(self) -> None:
         """Drop frames not yet played (the ADC goes back to filler)."""
@@ -420,7 +460,8 @@ class NlcEnv:
         limit = self.clock + int((n_packets + timeout_packets) * fpp * self.n_slots)
         while self.clock < limit:
             seg = self.sb.seg
-            if seg is not None and not self.play_q and seg.next >= n_packets:
+            if (seg is not None and not self.play_q and self.pending_seg is None
+                    and seg.next >= n_packets):
                 return True
             await ClockCycles(self.dut.clk, 256)
         self.sb.errors.append(f"timeout: {self.sb.seg.next if self.sb.seg else 0}/{n_packets} "
@@ -434,24 +475,32 @@ class NlcEnv:
     def _filler(self) -> np.ndarray:
         return self.rng.integers(0, 1024, size=self.n_slots)
 
+    def _next_row(self) -> np.ndarray:
+        return self.play_q.popleft() if self.play_q else self._filler()
+
     def _adc(self) -> tuple[int, int]:
-        d = self.dut
         if self.slot == 0:
-            n = self.frame_lens.popleft() if self.frame_lens else self.n_slots
             # data starts at the first frame boundary after the last config write took effect
-            if self.play_q and not self.cfg_q and self.cfg_idle >= 1:
-                if self.pending_seg is not None:
-                    x, slots = self.pending_seg
-                    self.sb.segments.append(Segment(x, self.clock, self.n_slots, slots))
-                    self.pending_seg = None
-                    self.data_frame = -1
-                    self.data_frame_clock = {}
-                row = self.play_q.popleft()
-                self.data_frame += 1
-                self.data_frame_clock[self.data_frame] = self.clock
-            else:
-                row = self._filler()
-            self.frame = row[:n] if n <= len(row) else np.concatenate([row, self._filler()])[:n]
+            if self.pending_seg is not None and not self.cfg_q and self.cfg_idle >= 1:
+                n_played, slots = self.pending_seg
+                if self.sb.seg is not None:
+                    self.sb.seg.closed = True
+                self.sb.segments.append(Segment(self.clock, self.n_slots, slots, n_played))
+                self.pending_seg = None
+                self.mon.new_run()
+            seg = self.sb.seg
+            live = seg is not None and not seg.closed
+            row = self._next_row() if live else self._filler()
+            fault = self.frame_faults.popleft() if self.frame_faults and live else None
+            if fault and fault[0] == "short":
+                row = row[:fault[1]]
+            elif fault and fault[0] == "long":
+                row = np.concatenate([row, self._filler()])[:fault[1]]
+            elif fault and fault[0] == "missing":
+                row = np.concatenate([row, self._next_row()])
+            self.frame = row
+            if live:
+                seg.add_frame(row, self.clock)
             self.adc_frame += 1
         v = int(self.frame[self.slot])
         frame = int(self.slot == 0)
@@ -482,13 +531,17 @@ class NlcEnv:
 
             await ReadOnly()
             if ready and _int(d.m_valid) == 1:
-                b, last = _int(d.m_data, 0), _int(d.m_last, 0)
-                if not self.rx:
-                    self.rx_first_clock = self.clock
-                self.rx.append(b)
                 self.host.took(self.clock)
-                if last:
-                    self._on_packet()
+                if self.has_abort and _int(d.m_abort, 0):
+                    self.sb.on_abort(bytes(self.rx), self.clock)
+                    self.rx.clear()
+                else:
+                    b, last = _int(d.m_data, 0), _int(d.m_last, 0)
+                    if not self.rx:
+                        self.rx_first_clock = self.clock
+                    self.rx.append(b)
+                    if last:
+                        self._on_packet()
             if self.lossy is not None:
                 self._monitor()
             self.clock += 1
@@ -500,8 +553,8 @@ class NlcEnv:
             m.cov["enable_drop_midblock"] += _int(self.lossy.n, 0) != 0
             m.cov["enable_drop_midpacket"] += _int(self.lossy.j, 0) != 0
             m.cov["enable_drop_flush"] += _int(self.rans.phase, 0) != 0
-        if en and not self.enabled:
-            self.mon.new_run()
+        if not en and self.sb.seg is not None:
+            self.sb.seg.closed = True
         self.enabled = en
 
     def _on_packet(self) -> None:
@@ -603,6 +656,7 @@ class NlcEnv:
                    "packets_lost": sum(len(s.lost) for s in self.sb.segments),
                    "errors": self.errors[:50], "n_errors": len(self.errors),
                    "notes": (self.sb.notes + self.mon.history)[:50], "packets_extra": self.sb.extra,
+                   "aborts": self.sb.aborts, "abort_port": self.has_abort,
                    **self.sb.quality()}
         if self.lossy is None:
             return r
@@ -611,9 +665,10 @@ class NlcEnv:
         B = cfg.block_len
         proc = []
         if self.sb.segments:                    # monitors keep the last segment only
-            for f, c0 in self.data_frame_clock.items():
+            seg = self.sb.seg
+            for f, c0 in enumerate(seg.frame_clock[:seg.n_played]):
                 blk = f - f % B
-                for ch, s in enumerate(self.sb.seg.slots):
+                for ch, s in enumerate(seg.slots):
                     t = m.last_fire.get((ch, blk + hz[f % B]))
                     if t is not None:
                         proc.append(t - (c0 + s))
@@ -695,6 +750,7 @@ class Mon:
 
     def delivery(self, seg: Segment, k: int, clock: int) -> None:
         """Latency of packet k's first sample: slot 0 of its first frame -> last byte taken."""
-        fpp = seg.codec.cfg.frames_per_packet
-        t0 = seg.first_clock + k * fpp * seg.n_slots + seg.slots[0]
+        f = k * seg.fpp
+        t0 = (seg.frame_clock[f] if f < len(seg.frame_clock)
+              else seg.first_clock + f * seg.n_slots) + seg.slots[0]
         self.deliv.append(clock - t0)

@@ -6,11 +6,15 @@ Every test writes a JSON of what it measured to $NLC_RESULTS (default test/resul
   T-IF-1/2/3   interface, slot selection, start-up            (C-IF-1..6)
   T-LAT-1      latency, from the monitors of T-IF-1           (C-LAT-1..3)
   T-BW-1/2     output bandwidth, host turnaround requirement  (C-BW-1..3, C-OVF-5)
-  T-OVF-1/2/3  host stalls: requirements of D3 and today's behaviour
-  T-ROB-1..6   long run, disable/reset, illegal config, frame faults, power-up state, random
+  T-OVF-1/2/3  host stalls: abort-and-flush rule (D6) and today's behaviour
+  T-ROB-1..7   long run, disable, illegal config, frame faults (D5), power-up state, random,
+               rst_n (D7)
 
-Known failures on today's RTL (input to the design phase, see docs/testing.md section 3):
-T-OVF-1/2 (no packet-granular drop yet). Others are listed there once found.
+Rules (docs/constraints.md D5-D7): frames are delimited by s_frame and a short frame repeats
+the missing channels' previous samples; when the output blocks, the packet in flight is aborted
+(abort token on m_abort), everything is flushed and output resumes at the next packet boundary;
+disable mid-packet sends the abort token; rst_n clears everything.
+Known failures on today's RTL (no m_abort port, no padding): docs/results.md F2-F4.
 
 Knobs: NLC_LONG=1 (T-ROB-1 70 packets, T-BW-2 16-packet check, full T-OVF-2 matrix),
 NLC_SEEDS=N (T-ROB-6, default 4), NLC_SEED=s (T-ROB-6 single seed, to reproduce).
@@ -112,7 +116,7 @@ async def t_if_3_enable_midframe(dut):
 @cocotb.test(**TIMEOUT, **KNOWN_FAIL)   # F2
 async def t_if_3_reenable(dut):
     """T-IF-3b: run, disable right after a packet is received, enable: == a run from reset."""
-    env = await fresh(dut, "t_if_3_reenable")
+    env = await fresh(dut, "t_if_3_reenable", allow_abort=True)
     env.configure(SPREAD)
     env.play_source("real", 1)
     await env.run(1)
@@ -175,20 +179,52 @@ async def t_bw_2(dut):
 # overflow (D3). T-OVF-1/2 state the requirement and fail on today's RTL.
 # ---------------------------------------------------------------------------
 
+LAG_CLOCKS = 8 * 256      # a packet's last bytes leave up to ~8 frames after its last frame
+
+
+def ovf_requirements(env: NlcEnv, stall_clocks: int, n: int) -> list[str]:
+    """D6 / C-OVF-1..4 from the pins. Received packets are checked bit-exact by the scoreboard
+    (a partial packet without an abort token shows up there as a mismatch). Here:
+      - a packet that ended well before the stall is delivered;
+      - every packet that starts after the host resumed is delivered (C-OVF-3/4);
+      - lost packets overlap the stall (nothing else is thrown away)."""
+    seg, out = env.sb.seg, []
+    if not env.host.stall_log:
+        return ["stall never started"]
+    s0 = env.host.stall_log[0][0]
+    s1 = s0 + stall_clocks
+    for k in range(n):
+        f0, f1 = k * FPP, (k + 1) * FPP
+        if f1 > len(seg.frame_clock):
+            break
+        start = seg.frame_clock[f0]
+        end = seg.frame_clock[f1 - 1] + 256 + LAG_CLOCKS
+        got = k in seg.got
+        if end < s0 and not got:
+            out.append(f"packet {k} ended before the stall but was not delivered")
+        if start > s1 and not got:
+            out.append(f"packet {k} starts after the host resumed but was not delivered (C-OVF-3)")
+        if not got and not (start <= s1 and end >= s0):
+            out.append(f"packet {k} lost although it does not overlap the stall")
+    return out
+
+
 async def _stall_run(dut, name: str, stall: Stall, n: int = 4, check: bool = True) -> dict:
-    env = await fresh(dut, name, host=Host(stalls=[stall]), allow_loss=True)
+    env = await fresh(dut, name, host=Host(stalls=[stall]), allow_loss=True, allow_abort=True)
     env.configure(SPREAD)
     env.play_source("real", n)
     await env.run(n, timeout_packets=2 + stall.clocks / PKT_CLOCKS)
+    env.sb.errors += ovf_requirements(env, stall.clocks, n)
     seg = env.sb.seg
-    after = [k for k in range(n) if k not in seg.got and k not in seg.lost]
-    return report(env, {"stall": vars(stall), "lost": seg.lost, "missing": after}, check=check)
+    return report(env, {"stall": vars(stall), "lost": seg.lost,
+                        "aborted": [a for a in seg.aborted]}, check=check)
 
 
 @cocotb.test(**TIMEOUT)
 async def t_ovf_1(dut):
-    """T-OVF-1: host stops for a whole packet, then resumes. Every received packet is bit-exact
-    (or marked damaged on the pins); the seq gap names the lost packets. C-OVF-1/2."""
+    """T-OVF-1: host stops for a whole packet, then resumes. Every packet the host receives
+    complete is bit-exact, a packet cut by the stall ends with the abort token, the seq gap
+    names the lost packets. C-OVF-1/2 (D6)."""
     await _stall_run(dut, "t_ovf_1", Stall(PKT_CLOCKS, at_packet=1, at_byte=0))
 
 
@@ -203,7 +239,8 @@ def _ovf2_cases():
 @cocotb.parametrize(case=_ovf2_cases())
 async def t_ovf_2(dut, case):
     """T-OVF-2: stalls of several lengths starting at the header, mid-payload or in the flush;
-    the first packet that starts after the resume and all later ones are intact. C-OVF-3/4."""
+    every packet that starts after the resume is intact, nothing outside the stall is lost.
+    C-OVF-3/4 (D6)."""
     where, byte, clocks = case
     if byte is None:                     # flush: the last FLUSH_TAIL bytes of a typical packet
         byte = 640 - FLUSH_TAIL // 2
@@ -243,7 +280,7 @@ ROB2_POINTS = ["midframe", "midpacket", "flush", "host_stall"]
 async def t_rob_2(dut, point):
     """T-ROB-2: disable at a given point, then enable: the next run == a run from reset."""
     host = Host(stalls=[Stall(3000, at_packet=0, at_byte=200)]) if point == "host_stall" else None
-    env = await fresh(dut, f"t_rob_2_{point}", host=host)
+    env = await fresh(dut, f"t_rob_2_{point}", host=host, allow_abort=True)
     env.configure(SPREAD)
     env.play_source("real", 2)
     if point == "midframe":
@@ -268,7 +305,7 @@ async def t_rob_2(dut, point):
 async def t_rob_3(dut):
     """T-ROB-3: config written while enabled (illegal): no hang; after disable, reconfigure,
     enable the output is correct. C-IF-7."""
-    env = await fresh(dut, "t_rob_3")
+    env = await fresh(dut, "t_rob_3", allow_abort=True)
     env.configure(SPREAD)
     env.play_source("real", 1)
     await env.until(lambda e: e.data_frame == 50, 60 * 256)
@@ -283,20 +320,28 @@ async def t_rob_3(dut):
     report(env)
 
 
+FRAME_FAULTS = {
+    "short": [("short", 200)],              # cuts the last 3 selected slots (200, 254, 255)
+    "short_early": [("short", 20)],         # only slot 3 reached
+    "short_twice": [("short", 100), ("short", 100)],
+    "long": [("long", 300)],
+    "missing": [("missing",)],
+}
+
+
 @cocotb.test(**TIMEOUT)
-@cocotb.parametrize(fault=["short", "long", "missing"])
+@cocotb.parametrize(fault=list(FRAME_FAULTS))
 async def t_rob_4(dut, fault):
-    """T-ROB-4: frame-length faults in packet 0 (early s_frame, late s_frame, a missing
-    s_frame = one double-length frame), then regular frames: no hang, and packets from
-    packet 2 on match the model (at some frame offset). C-IF-8."""
-    env = await fresh(dut, f"t_rob_4_{fault}", grace=2, resync=4)
+    """T-ROB-4: frame faults in packet 0 (early s_frame, late s_frame, missing s_frame).
+    Every packet must equal the model on the frames as driven, under the frame rule D5
+    (short frame: missing channels repeat their previous sample). C-IF-8."""
+    env = await fresh(dut, f"t_rob_4_{fault}")
     env.configure(SPREAD)
-    lens = {"short": [200], "long": [300], "missing": [512]}[fault]
-    env.play_source("real", 4)
-    await env.until(lambda e: e.data_frame == 20 and e.slot == 5, 30 * 256)
-    env.frame_lens.extend(lens)
-    await env.run(4)
-    report(env, {"fault": fault, "frame_lens": lens})
+    env.play_source("real", 2)
+    await env.until(lambda e: e.data_frame == 20, 30 * 256)
+    env.frame_faults.extend(FRAME_FAULTS[fault])
+    await env.run(2)
+    report(env, {"fault": fault, "frame_faults": FRAME_FAULTS[fault]})
 
 
 NO_RESET = {
@@ -363,3 +408,29 @@ async def t_rob_6(dut, seed):
     await env.run(1)
     report(env, {"seed": seed, "source": source, "turnaround": host.turnaround,
                  "p_ready": host.p_ready})
+
+
+@cocotb.test(**TIMEOUT)
+@cocotb.parametrize(point=["midpacket", "flush", "host_stall"])
+async def t_rob_7(dut, point):
+    """T-ROB-7: rst_n at a given point: the output is empty right after reset, and after
+    configure + enable the run equals a run from power-up (D7). The host resets with the chip
+    and drops its partial packet."""
+    host = Host(stalls=[Stall(3000, at_packet=0, at_byte=200)]) if point == "host_stall" else None
+    env = await fresh(dut, f"t_rob_7_{point}", host=host)
+    env.configure(SPREAD)
+    env.play_source("real", 2)
+    if point == "midpacket":
+        await env.until(lambda e: e.data_frame == 100, 120 * 256)
+    elif point == "flush":
+        await env.until(lambda e: e.lossy is not None and int(e.rans.phase.value) != 0, 2 * PKT_CLOCKS)
+    else:
+        await env.until(lambda e: e.clock in range(e.host.stall_until - 1000, e.host.stall_until),
+                        2 * PKT_CLOCKS)
+    await env.reset()
+    env.play_queue_clear()
+    env.configure(SPREAD)
+    env.play_source("real", 1, offset=30000)
+    await env.run(1)
+    report(env)
+

@@ -176,8 +176,8 @@ happens later; the test only tells you which parameter is affected.
 
 | ID | test | pass | covers | status |
 |---|---|---|---|---|
-| T-OVF-1 | Host stops acking for a whole packet, then resumes | each received packet is either bit-exact or identifiable as damaged from the pins; the seq gap matches the lost packets | C-OVF-1/2 | exists, **fails (F3)**, known-fail |
-| T-OVF-2 | Same, several stall lengths (1 byte .. 3 packets) and stall start points (header, mid-payload, during flush) | first packet that starts after resume is intact; all later packets bit-exact | C-OVF-3/4, C-FN-3 | exists, **fails (F3)** except a 300-clock stall |
+| T-OVF-1 | Host stops for a whole packet, then resumes | complete packets bit-exact, the cut packet ends with the abort token, seq gap = lost packets (D6) | C-OVF-1/2 | exists, **fails (F3)** |
+| T-OVF-2 | Stalls starting at the header, mid-payload, in the flush (`NLC_LONG=1`: 4 lengths each) | every packet starting after the resume delivered, nothing outside the stall lost (D6) | C-OVF-3/4 | exists, **fails (F3)** except a 300-clock stall |
 | T-OVF-3 | Today's behaviour, recorded as the "before" point: byte drop + sticky flag | documents the gap to C-OVF-1 | exists (records F3) |
 
 **Latency and bandwidth (measured by monitors, scored by the flow)**
@@ -195,9 +195,10 @@ happens later; the test only tells you which parameter is affected.
 | T-ROB-1 | Long run: >= 70 packets (seq wraps past 63) with the generator, RTL | bit-exact, seq wraps | C-FN-4 | exists (`NLC_LONG=1`), not run yet |
 | T-ROB-2 | Reset and disable at random points (mid-frame, mid-packet, during flush, during host stall); next run == fresh run | bit-exact, no hang | C-IF-6 | exists, **fails (F2)** |
 | T-ROB-3 | Config written while enabled (illegal), then disable/enable | no hang; correct afterwards | C-IF-7 | exists, **fails (F2)** |
-| T-ROB-4 | Frame-length faults: early/late/missing `s_frame`, then regular frames | no hang; correct within one packet | C-IF-8 | exists: long/missing pass, short **fails (F4)** |
+| T-ROB-4 | Frame faults: early `s_frame` (3 variants), late, missing; strict against the frame rule D5 | bit-exact | C-IF-8 | exists: long/missing pass, short x3 **fail (F4)** |
 | T-ROB-5 | Power-up state: Verilator 2-state with random register init (several seeds) and Icarus/GL with X-init; output identical | identical bytes for all seeds; no X on outputs after the first frame | C-FN-6 | exists, pass (random deposit, 234 regs, 3 seeds) |
 | T-ROB-6 | Random regression: N seeded runs mixing data source, n_sel, slots, host model and stalls (nightly) | 0 failures; failing seed reproducible | all C-FN, C-IF | exists, pass (4 seeds) |
+| T-ROB-7 | `rst_n` mid-packet, during the flush, during a host stall | output empty right after reset; next run == run from power-up (D7) | C-IF-6 | exists, pass |
 
 **Gate level, equivalence, implementation**
 

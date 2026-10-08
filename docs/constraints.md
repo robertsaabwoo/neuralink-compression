@@ -14,8 +14,11 @@ Sources: `docs/platform.md` (Neuralink, TT), `docs/budgets.md` (numeric pass/fai
 |---|---|---|
 | D1 | **Silicon = lossy mode (1) only.** Modes 0/2/3 stay in the golden model, not in RTL | TT-top tests for modes 0/2/3 are skipped with a reason, not failed; model tests for them stay |
 | D2 | **Clock = ADC slot rate, 5 MHz (200 ns), one slot per clock** | STA, gate-level, power and the TT top are all checked at 200 ns; the 20 ns template default is not a target |
-| D3 | **Output overflow drops whole packets** (no backpressure to the ADC is possible) | constraints C-OVF-*: a lost packet must be detectable from the pins and recovery is automatic |
+| D3 | **Output overflow loses whole packets** (no backpressure to the ADC is possible; mechanism: D6) | constraints C-OVF-*: a lost packet must be detectable from the pins and recovery is automatic |
 | D4 | **Power budget is Neuralink-derived**: ~10 uW/channel for compression *and* radio | compressor share: target 2 uW/ch, limit 5 uW/ch (C-PWR-1) |
+| D5 | **Frames are delimited by `s_frame`.** A short frame: channels whose slot was not reached repeat their previous sample (512 if none since enable). Slots after the last selected one are ignored (long frame, missing `s_frame`) | one sample per channel per frame, always; rule in `model/nlc/adc.py`; C-IF-8 |
+| D6 | **Blocked output = abort and flush.** When a byte cannot be written (output FIFO full), the packet in flight is aborted: abort token to the host, every FIFO and the coder cleared, ADC samples ignored but frames still counted; output resumes with the next packet that starts after the host reads again. No packet is stored whole (a packet is up to 5.5 KB; the design holds ~1 KB) | C-OVF-*; replaces D3's "drop whole packets" |
+| D7 | **Reset.** `rst_n`: everything cleared at once, output empty; the host resets with the chip. `enable` = 0: the same, and a packet the host has partly received is ended with the abort token | C-IF-6/7 |
 
 ## 1. Interface (environment the chip lives in)
 
@@ -26,9 +29,9 @@ Sources: `docs/platform.md` (Neuralink, TT), `docs/budgets.md` (numeric pass/fai
 | C-IF-3 | Slot rate = clock rate; per-channel rate = clock / 256 | 5 MHz -> 19.53 kHz (target 16-20 kHz) | [1], [4]; derived | T-IF-1 |
 | C-IF-4 | Selected channels: `n_sel` 1..8, slots strictly ascending, any slot 0..255 including 0 and 255 and adjacent slots | 1..8 | patent [2] (4-8 lossy) | T-IF-2 |
 | C-IF-5 | The first packet after `enable` starts on a frame boundary and has seq 0 | | `nlc_slot_sel` contract | T-IF-3 |
-| C-IF-6 | `enable` = 0 clears all state; the next run is bit-identical to a run from reset | | `nlc_encoder` contract | T-IF-3, T-ROB-2 |
+| C-IF-6 | `enable` = 0 clears all state; a packet the host has partly received ends with the abort token (D7); the next run is bit-identical to a run from reset | | D7 | T-IF-3, T-ROB-2 |
 | C-IF-7 | Config writes happen only while `enable` = 0. A write while enabled must not hang the chip: after the next disable/enable, output is correct | | contract; set by us | T-ROB-3 |
-| C-IF-8 | `s_frame` arriving early or late (frame shorter or longer than 256 slots) must not hang the chip; output resynchronises within one packet after frames are regular again | set by us | T-ROB-4 |
+| C-IF-8 | Frame faults (early, late or missing `s_frame`) never hang the chip and never shift the channels: every packet equals the model on the frames as driven, under the frame rule D5 | | D5 | T-ROB-4 |
 | C-IF-9 | Pin path (TT, real data from the host): strobe protocol of `src/project.v`, at most one slot every 2 clocks, frames at least **64 clocks** long | derived: lossy flush needs ~Q_W + 3 + 3 x N_SEL x SB / 2 = 10 + 3 + 36 = 49 cycles per frame (`nlc_lossy.sv` header) | T-IF-4 |
 | C-IF-10 | Output: bytes on `uo_out`, `m_valid`/`m_last` on `uio[6]/uio[7]`, host takes a byte with an `m_ack` rising edge | | `src/project.v` | T-IF-4, T-BW-2 |
 
@@ -56,10 +59,11 @@ describe what the host sees. How the RTL does it is a design-phase item.
 | C-OVF-4 | The input side is unaffected: no sample of a later packet is lost or shifted (C-IF-2) | T-OVF-2 |
 | C-OVF-5 | Without host stalls, overflow never happens for any input data, including worst-case data, as long as the host meets C-BW-3 | T-BW-2 |
 
-Open (design phase): the pin-level signalling for "damaged/aborted packet" (uio has no free
-pin; options include a sideband meaning for `m_last` while `m_valid` = 0, or truncating at a
-packet boundary). Tests T-OVF-* are written against C-OVF-1..4 and are adapted once a
-signalling scheme is chosen.
+**Abort token (D6, D7).** At the `nlc_core` boundary a new output `m_abort` qualifies a
+transfer: `m_valid` = `m_abort` = 1 means "discard the bytes of the current packet"; it travels
+through the output FIFO in order with the bytes. On the TT pins (no free uio pin) the suggested
+encoding is `m_last` = 1 while `m_valid` = 0; to be fixed when the TT top is updated. Tests
+T-OVF-*, T-IF-3, T-ROB-2/3 read `m_abort` when the port exists.
 
 ## 4. Latency
 

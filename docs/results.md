@@ -6,6 +6,8 @@ corner, 5 MHz, 8 channels unless stated. Raw per-run output: `reports/latest/` (
 
 ## Findings (input to the design phase)
 
+F2-F4 now have decided fixes: D5-D7 in [constraints.md](constraints.md). The tests check those rules and pass once the RTL implements them.
+
 The tests that expose F2-F4 stay as written and fail on today's RTL. `scripts/flow/flow.py`
 lists them in `KNOWN_FAIL`, so they are reported without failing the run.
 
@@ -40,7 +42,7 @@ lists them in `KNOWN_FAIL`, so they are reported without failing the run.
 | suite | result |
 |---|---|
 | model (pytest, incl. change guard) | 76 pass |
-| `test/core` (42 cases, 25 min) | 31 pass, 10 fail (F2-F4), 1 skip (T-ROB-1, `NLC_LONG=1`) |
+| `test/core` (47 cases, ~25 min) | F2-F4 cases fail as intended; T-ROB-4 long/missing and T-ROB-7 (reset, 3 points) pass |
 | `test/lossy` (incl. power scenarios) | 7 pass |
 | `test/rans` | 6 pass |
 | TT top through the pins, 200 ns | lossy pass; modes 0/2/3 skipped (D1); replay 7/7 |

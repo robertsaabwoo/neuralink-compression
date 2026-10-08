@@ -53,14 +53,14 @@ AREA_SWEEP = [2, 4, 8, 16]    # N_SEL values for T-AREA-2 (SEL_W >= 1, so no N_S
 PENDING_TESTS = {"test_lossless", "test_binned", "test_sbp", "test_lossless_host_never_waits"}
 # test/core tests that fail on today's RTL; name prefix -> reason (docs/testing.md section 3).
 # A prefix may cover cases that pass (e.g. a stall short enough to be absorbed).
-_ABORT = ("F2: disable mid-packet leaves an unterminated packet at the host; it merges with the "
-          "next run's packet 0 (C-IF-6)")
-_OVF = ("F3: a host stall corrupts the stalled packet and every later one, no recovery, "
-        "no pin shows it (C-OVF-1..3, D3)")
-_FRAME = ("F4: one short frame (early s_frame) misaligns the channel/coder order for good; "
-          "no resync within a packet (C-IF-8)")
+_ABORT = ("F2: disable mid-packet must end the packet with the abort token (D7); "
+          "today the next run's packet 0 is glued to it")
+_OVF = ("F3: a blocked output must abort the packet, flush and resume at the next packet (D6); "
+        "today every later packet is corrupt")
+_FRAME = ("F4: a short frame must repeat the missing channels' previous samples (D5); "
+          "today the channel order slips for good")
 KNOWN_FAIL = {
-    "t_ovf_1": _OVF, "t_ovf_2": _OVF, "t_rob_4/fault=short": _FRAME,
+    "t_ovf_1": _OVF, "t_ovf_2": _OVF, "t_rob_4": _FRAME,     # t_rob_4 long/missing pass
     "t_if_3_reenable": _ABORT, "t_rob_2": _ABORT, "t_rob_3": _ABORT,
 }
 # functional coverage bins the T2 regression must hit (docs/testing.md 4.5)
