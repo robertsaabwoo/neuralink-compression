@@ -1,8 +1,9 @@
-"""Export golden-model test vectors for the cocotb testbench.
+"""Export golden-model test vectors for the cocotb testbench (lossy mode: the only
+mode in silicon, decision D1).
 
   python scripts/gen_vectors.py --out test/vectors
 
-Per mode, in <out>/<mode>/:
+In <out>/lossy/:
   input.hex     one 10-bit sample per line, frame-major over the selected channels
   expected.hex  one output word per line: bit 8 = last byte of packet, bits 7:0 = byte;
                 a final 0x200 terminator marks the end (used by the replay mock)
@@ -20,13 +21,10 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "model"))
 
-from nlc import (BinnedConfig, BinnedSpikeCodec, FrontEndConfig, LosslessCodec,  # noqa: E402
-                 RiceConfig, SbpConfig, SpikeBandPowerCodec, calibrate_thresholds,
-                 encode_stream)
+from nlc import encode_stream  # noqa: E402
 from nlc.data import synthetic  # noqa: E402
 from nlc.lossy import LossyCodec, LossyConfig, default_tables, fifo_profile  # noqa: E402
 
@@ -44,19 +42,8 @@ def main() -> None:
 
     k = len(args.slots)
     x = synthetic(k, args.frames, seed=args.seed, rate_hz=100.0)
-    fe = FrontEndConfig()
-    thr = np.minimum(calibrate_thresholds(x, fe), 255)
-    rice = RiceConfig(frames_per_packet=32)
-    binned = BinnedConfig(bin_len=200, group=4)
-    sbp = SbpConfig(sbp_len=200, sbp_shift=5)
     lossy = LossyConfig(n_flush=8)            # the RTL flushes all N_SEL = 8 channel states
-    cases = {
-        "lossless": (LosslessCodec(rice), {"rice": asdict(rice)}),
-        "binned": (BinnedSpikeCodec(fe, binned, thr),
-                   {"frontend": asdict(fe), "binned": asdict(binned), "thresholds": thr.tolist()}),
-        "sbp": (SpikeBandPowerCodec(fe, sbp), {"frontend": asdict(fe), "sbp": asdict(sbp)}),
-        "lossy": (LossyCodec(lossy, default_tables()), {"lossy": asdict(lossy)}),
-    }
+    cases = {"lossy": (LossyCodec(lossy, default_tables()), {"lossy": asdict(lossy)})}
     for name, (codec, cfg) in cases.items():
         d = args.out / name
         d.mkdir(parents=True, exist_ok=True)

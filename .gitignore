@@ -24,3 +24,4 @@ docker/src/
 
 # local working notes, not published
 HANDOFF.md
+.durations.json

@@ -580,7 +580,8 @@ class NlcEnv:
             pushes = _int(ly.pushes, 0)
             for _ in range(pushes):
                 m.fifo[ch].append((m.frame, self.clock))
-            m.cov[f"occ_{_int(ly.occ, 0)}"] += 1
+            if pushes:                  # burst buffer occupancy after the push
+                m.cov[f"occ_{len(m.fifo[ch])}"] += 1
             if _int(ly.smp_last, 0):
                 m.frame += 1
         r_valid = _int(ly.r_valid, 0)

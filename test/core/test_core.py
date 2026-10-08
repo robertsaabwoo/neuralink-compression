@@ -121,8 +121,9 @@ async def t_if_3_enable_midframe(dut):
 
 @cocotb.test(**TIMEOUT)
 async def t_if_3_reenable(dut):
-    """T-IF-3b: run, disable right after a packet is received, enable: == a run from reset."""
-    skip_known()   # F2
+    """T-IF-3b: run, disable right after a packet is received, enable: == a run from reset.
+    Passes since the eager FIFO drain: no byte of the next packet is out yet at that point
+    (disabling mid-packet is still F2: T-ROB-2/3)."""
     env = await fresh(dut, "t_if_3_reenable", allow_abort=True)
     env.configure(SPREAD)
     env.play_source("real", 1)
@@ -351,29 +352,46 @@ async def t_rob_4(dut, fault):
     report(env, {"fault": fault, "frame_faults": FRAME_FAULTS[fault]})
 
 
+# Registers without reset that are not clock-gated storage (nlc_greg instances are found
+# by walking the hierarchy: every nlc_greg holds no-reset storage by design).
 NO_RESET = {
-    "u_enc.u_lossy": ["e1", "o1", "dp1", "e2", "o2", "dp2", "e3", "o3", "dp3", "qa_prev",
-                      "fifo", "fctx", "sbuf", "slast"],
-    "u_enc.u_lossy.u_rans": ["st_mem", "a_x", "a_f", "a_c", "a_ch", "a_rv", "a_raw", "d_rem",
-                             "d_dq", "d_f", "d_c", "d_ch", "o_data", "o_keep", "o_last"],
-    "u_fifo": ["mem"],
+    "u_enc.u_lossy.u_rans": ["d_rem", "d_dq", "d_f", "d_c", "d_ch", "o_last"],
 }
+
+
+def _gated_regs(h, depth: int = 0) -> list:
+    """The q of every nlc_greg below h (a scope with the ports clk, en, d, q; RTL sim
+    lists the parameter W too, synthesis-style builds the gate gclk, u_icg)."""
+    found = []
+    if depth > 8:
+        return found
+    for c in h:
+        try:
+            kids = {k._name for k in c}
+        except TypeError:                 # a signal, not a scope
+            continue
+        if {"clk", "en", "d", "q"} <= kids <= {"clk", "en", "d", "q", "W", "gclk", "u_icg"}:
+            found.append(c.q)
+        else:
+            found += _gated_regs(c, depth + 1)
+    return found
 
 
 def _deposit(seed: int):
     def f(dut):
         rng = random.Random(seed)
-        n = 0
+        regs = _gated_regs(dut)
         for path, names in NO_RESET.items():
             mod = dut
             for p in path.split("."):
                 mod = getattr(mod, p)
-            for nm in names:
-                h = getattr(mod, nm)
-                items = list(h) if isinstance(h, ArrayObject) else [h]
-                for it in items:
-                    it.value = rng.getrandbits(len(it))
-                    n += 1
+            regs += [getattr(mod, nm) for nm in names]
+        n = 0
+        for h in regs:
+            for it in (list(h) if isinstance(h, ArrayObject) else [h]):
+                it.value = rng.getrandbits(len(it))
+                n += 1
+        assert n > 100, f"T-ROB-5 found only {n} no-reset registers: hierarchy walk broken?"
         dut._log.info(f"T-ROB-5: random power-up state in {n} registers (seed {seed})")
     return f
 
@@ -441,3 +459,29 @@ async def t_rob_7(dut, point):
     await env.run(1)
     report(env)
 
+
+
+# ---------------------------------------------------------------------------
+# power scenarios (T-PWR-2): the whole core (config, slot selector, encoder, output FIFO)
+# at the real interface. Gate level with a VCD in scripts/flow/flow.py (step power);
+# in RTL they are ordinary bit-exact runs.
+# ---------------------------------------------------------------------------
+
+@cocotb.test(**TIMEOUT)
+async def t_pwr_op(dut):
+    """T-PWR-2 op: 8 spread slots of 256, real data, 2 packets (VCD from frame 64)."""
+    env = await fresh(dut, "t_pwr_op")
+    env.configure(SPREAD)
+    env.play_source("real", 2)
+    await env.run(2)
+    report(env)
+
+
+@cocotb.test(**TIMEOUT)
+async def t_pwr_idle(dut):
+    """T-PWR-2 idle: configured, enable = 0, the ADC stream keeps running (C-PWR-2)."""
+    env = await fresh(dut, "t_pwr_idle")
+    env.configure(SPREAD, enable=False)
+    await env.idle(4 * 256)
+    assert int(dut.m_valid.value) == 0
+    report(env)

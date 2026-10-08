@@ -32,20 +32,14 @@ module nlc_core #(
   localparam SEL_W   = $clog2(N_SEL);
   localparam FIFO_AW = $clog2(FIFO_DEPTH);
 
-  wire [1:0]          mode;
   wire                enable;
   wire [SEL_W:0]      n_sel;
-  wire [7:0]          fpp;
-  wire [15:0]         win_len;
-  wire [4:0]          sbp_shift;
   wire [8*N_SEL-1:0]  sel_slots;
-  wire [8*N_SEL-1:0]  thr;
 
   nlc_cfg #(.N_SEL(N_SEL)) u_cfg (
       .clk(clk), .rst_n(rst_n),
       .cfg_we(cfg_we), .cfg_addr(cfg_addr), .cfg_data(cfg_data),
-      .mode(mode), .enable(enable), .n_sel(n_sel), .fpp(fpp),
-      .win_len(win_len), .sbp_shift(sbp_shift), .sel_slots(sel_slots), .thr(thr)
+      .enable(enable), .n_sel(n_sel), .sel_slots(sel_slots)
   );
 
   wire                smp_valid;
@@ -69,8 +63,7 @@ module nlc_core #(
 
   nlc_encoder #(.ADC_BITS(ADC_BITS), .N_SEL(N_SEL), .FIFO_AW(FIFO_AW)) u_enc (
       .clk(clk), .rst_n(rst_n),
-      .enable(enable), .mode(mode), .n_sel(n_sel), .fpp(fpp), .win_len(win_len),
-      .sbp_shift(sbp_shift), .thr(thr),
+      .enable(enable), .n_sel(n_sel),
       .smp_valid(smp_valid), .smp_data(smp_data), .smp_ch(smp_ch),
       .smp_first(smp_first), .smp_last(smp_last),
       .wr_en(wr_en), .wr_data(wr_data), .wr_last(wr_last),

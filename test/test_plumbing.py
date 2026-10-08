@@ -14,17 +14,20 @@ from harness import GATES, SLOT_CYCLES, drive_adc, reset, write_reg
 @cocotb.test(skip=GATES)
 async def test_config_registers(dut):
     pins = await reset(dut)
-    for addr, data in [(regs.N_SEL, 3), (regs.SEL_SLOT + 2, 0xA5), (regs.FPP, 32),
-                       (regs.WIN_LO, 0x34), (regs.WIN_HI, 0x12), (regs.THR + 7, 0x5C),
-                       (regs.CTRL, 0x02)]:
-        await write_reg(pins, addr, data)
     cfg = dut.user_project.core.u_cfg
+    reset_slots = int(cfg.sel_slots.value)
+    # retired addresses of the model-only modes (0x02-0x05 fpp/window/sbp, 0x20+ thresholds)
+    # must not touch anything; CTRL's mode bits are ignored (lossy only, D1)
+    for addr, data in [(regs.N_SEL, 3), (regs.SEL_SLOT + 2, 0xA5), (0x02, 0x20), (0x03, 0x34),
+                       (0x05, 0x1F), (0x27, 0x5C), (regs.CTRL, 0x02)]:
+        await write_reg(pins, addr, data)
     assert int(cfg.n_sel.value) == 3
-    assert (int(cfg.sel_slots.value) >> 16) & 0xFF == 0xA5
-    assert int(cfg.fpp.value) == 32
-    assert int(cfg.win_len.value) == 0x1234
-    assert int(cfg.thr.value) >> 56 == 0x5C
-    assert int(cfg.mode.value) == 2 and int(cfg.enable.value) == 0
+    slots = int(cfg.sel_slots.value)
+    assert (slots >> 16) & 0xFF == 0xA5
+    assert slots & ~(0xFF << 16) == reset_slots & ~(0xFF << 16)
+    assert int(cfg.enable.value) == 0
+    await write_reg(pins, regs.CTRL, regs.CTRL_ENABLE | 0x03)
+    assert int(cfg.enable.value) == 1
 
 
 @cocotb.test(skip=GATES)

@@ -88,6 +88,20 @@
       "unit": "uW",
       "why": "C-PWR-2: enable = 0, clock running"
     },
+    "core_power_uw": {
+      "limit": 40.0,
+      "target": 16.0,
+      "cmp": "<=",
+      "unit": "uW",
+      "why": "C-PWR-1 at system level: nlc_core (config, slot selector, encoder, output FIFO) at the real 256-slot interface, real data (T-PWR-2)"
+    },
+    "core_power_idle_uw": {
+      "limit": 10.0,
+      "target": 2.0,
+      "cmp": "<=",
+      "unit": "uW",
+      "why": "C-PWR-2 at system level: nlc_core configured, enable = 0, ADC stream running (T-PWR-2)"
+    },
     "power_worst_uw": {
       "limit": 40.0,
       "target": 40.0,

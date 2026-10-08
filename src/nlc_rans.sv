@@ -38,6 +38,7 @@ module nlc_rans #(
 ) (
     input  logic                   clk,
     input  logic                   rst_n,      // asynchronous clear of the control state
+    output logic                   active,     // registers need a clock edge this cycle
 
     input  logic                   s_tvalid,
     output logic                   s_tready,
@@ -94,8 +95,8 @@ module nlc_rans #(
   // edge while it has work: a symbol accepted or in flight, a word to hand on,
   // or the packet end. Control registers clear asynchronously on rst_n.
   logic clk_c;
-  nlc_icg u_cg_c (.clk(clk), .en(adv && (fire || pipe_busy || o_v || phase != RUN)),
-                  .gclk(clk_c));
+  assign active = adv && (fire || pipe_busy || o_v || phase != RUN);
+  nlc_icg u_cg_c (.clk(clk), .en(active), .gclk(clk_c));
 
   // ---------------------------------------------------------------------------
   // Per-channel state, "not used yet this packet" flags, ROM

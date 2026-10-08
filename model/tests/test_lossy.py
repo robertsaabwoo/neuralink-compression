@@ -7,7 +7,7 @@ from nlc.lossy import (LossyCodec, LossyConfig, channel_symbols, dwt_fwd, dwt_in
 from nlc.packet import decode_stream, encode_stream, stream_bits
 from nlc.rans import RansTables, normalize_freqs, rans_decode, rans_encode
 
-HW_FIFO_DEPTH = 8          # src/nlc_lossy.sv QDEPTH
+HW_FIFO_DEPTH = 4          # src/nlc_lossy.sv QDEPTH (burst buffer)
 
 
 @pytest.mark.parametrize("levels", [1, 3, 5])
@@ -38,7 +38,7 @@ def test_production_order_covers_every_coefficient_once():
 def test_fifo_depth_fits_hardware():
     peak, lag = fifo_profile(LossyConfig())
     assert peak <= HW_FIFO_DEPTH
-    assert (peak, lag) == (7, 6)
+    assert (peak, lag) == (4, 0)
 
 
 def test_rans_roundtrip(rng):

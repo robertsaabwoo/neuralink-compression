@@ -176,9 +176,9 @@ def test_chg2_hardware_assumptions_hold():
     cfg, hw = LossyConfig(), rtl_constants()
     problems = []
     peak, lag = fifo_profile(cfg)
-    if peak + 1 > hw["qdepth"]:
-        problems.append(f"FIFO peak {peak} needs depth >= {peak + 1}; nlc_lossy.sv QDEPTH = "
-                        f"{hw['qdepth']}")
+    if peak > hw["qdepth"]:
+        problems.append(f"bursts of {peak} symbols need a burst buffer of {peak}; nlc_lossy.sv "
+                        f"QDEPTH = {hw['qdepth']}")
     vmax = value_range(cfg)
     if vmax.bit_length() + 1 > hw["qw"]:
         problems.append(f"symbol values reach +-{vmax}: need {vmax.bit_length() + 1} bits, "

@@ -54,31 +54,28 @@ module tt_um_nlc_compressor (
   wire ack    = uio_q[4] & ~ack_q;
   wire cfg_en = uio_q[5];
 
-  // config bytes: address, then data
-  reg       have_addr;
-  reg       cfg_we;
-  reg [7:0] cfg_addr;
-  reg [7:0] cfg_data;
+  // config bytes: address, then data. cfg_addr/cfg_data are clock-gated (written on a
+  // config strobe only; read only with cfg_we, so they need no reset).
+  reg        have_addr;
+  reg        cfg_we;
+  wire [7:0] cfg_addr;
+  wire [7:0] cfg_data;
+  wire       cfg_strobe = rst_n & cfg_en & strobe;
+
+  nlc_greg #(.W(8)) u_cfg_addr (.clk(clk), .en(cfg_strobe & ~have_addr), .d(ui_q), .q(cfg_addr));
+  nlc_greg #(.W(8)) u_cfg_data (.clk(clk), .en(cfg_strobe &  have_addr), .d(ui_q), .q(cfg_data));
 
   always @(posedge clk) begin
     if (!rst_n) begin
       have_addr <= 1'b0;
       cfg_we    <= 1'b0;
-      cfg_addr  <= 8'd0;
-      cfg_data  <= 8'd0;
     end else begin
       cfg_we <= 1'b0;
       if (!cfg_en) begin
         have_addr <= 1'b0;
       end else if (strobe) begin
-        if (!have_addr) begin
-          cfg_addr  <= ui_q;
-          have_addr <= 1'b1;
-        end else begin
-          cfg_data  <= ui_q;
-          cfg_we    <= 1'b1;
-          have_addr <= 1'b0;
-        end
+        have_addr <= ~have_addr;
+        cfg_we    <= have_addr;
       end
     end
   end

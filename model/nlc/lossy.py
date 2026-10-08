@@ -25,12 +25,12 @@ order, whichever of these became ready:
 
   d1, d2, ..., dL, delta(aL)
 
-so a channel's coefficients form a FIFO in "production order". Production is
-bursty (0 to levels+1 per sample) but averages exactly one per sample, so the
-hardware pops exactly one per channel per sample (a small FIFO absorbs the
-bursts) and the rANS coder sees one symbol per input sample, round-robin over
-channels, the same as the input. With a 64-frame block, 3 levels, the FIFO
-peaks at 7 entries and a block's last symbols leave 6 frames into the next.
+so a channel's coefficients are in "production order". Production is bursty
+(0 to levels+1 per sample, averaging one). The hardware codes each burst as
+soon as it is pushed ("eager drain"): the coder takes one symbol per clock and
+a frame has hundreds of clocks, so every burst is coded before the channel's
+next sample. Per channel this needs a buffer of one burst (levels+1 entries),
+and a block's last symbols are coded in its last frame (no lag).
 
 Symbols
 -------
@@ -42,8 +42,10 @@ A value v with |v| <= s_max is symbol v + s_max; anything else is ESC
 Payload
 -------
 The packet's blocks, each channel's symbols concatenated block after block
-(its FIFO order), sent j-major then channel (symbol j of channel 0, symbol j
-of channel 1, ...), coded by the TDM static rANS of nlc.rans_tdm (one state per
+(production order), sent in coding order (`coding_order`): frame by frame,
+channel by channel, each channel's burst of that frame in push order. The
+burst size of a frame is the same for every channel (`push_schedule`), so the
+decoder rebuilds the order. Coded by the TDM static rANS of nlc.rans_tdm (one state per
 channel, one table per context): renorm/raw bytes, then the final state of
 channels 0..n_flush-1, ceil((prob_bits + lsh + 8) / 8) bytes each. No length
 field: the packet ends at the byte stream's end-of-packet flag.
@@ -231,16 +233,22 @@ def push_schedule(cfg: LossyConfig) -> list[int]:
 
 
 def fifo_profile(cfg: LossyConfig, n_blocks: int = 4) -> tuple[int, int]:
-    """(peak FIFO occupancy after a push, frames a block's last symbol lags its end)
-    with one pop per channel per frame. Same for every channel."""
-    pushes = push_schedule(cfg)
-    occ = peak = 0
-    for _ in range(n_blocks):
-        for n in pushes:
-            occ += n
-            peak = max(peak, occ)
-            occ -= occ > 0
-    return peak, occ
+    """(per-channel buffer entries needed, frames a block's last symbol lags its end)
+    with eager drain: a burst is coded before the channel's next sample, so the buffer
+    holds one burst and nothing lags. Same for every channel."""
+    return max(push_schedule(cfg)), 0
+
+
+def coding_order(cfg: LossyConfig, n_ch: int) -> list[tuple[int, int]]:
+    """(channel, index in that channel's production order) of a packet's symbols in the
+    order the coder takes them: frame by frame, channel by channel, a burst in push order."""
+    order, nxt = [], 0
+    for _ in range(cfg.blocks_per_packet):
+        for n in push_schedule(cfg):
+            for c in range(n_ch):
+                order += [(c, nxt + k) for k in range(n)]
+            nxt += n
+    return order
 
 
 def _check_cfg(cfg: LossyConfig) -> None:
@@ -322,23 +330,24 @@ class LossyCodec:
                    for kv in channel_symbols(block[b * B:(b + 1) * B, c], cfg)]
                   for c in range(n_ch)]
         chans, ctxs, syms, raws = [], [], [], []
-        for j in range(len(self._layout)):
-            for c in range(n_ch):
-                k, v = per_ch[c][j]
-                s, raw = symbol_of(v, cfg)
-                chans.append(c)
-                ctxs.append(k)
-                syms.append(s)
-                raws.append(raw)
+        for c, j in coding_order(cfg, n_ch):
+            k, v = per_ch[c][j]
+            s, raw = symbol_of(v, cfg)
+            chans.append(c)
+            ctxs.append(k)
+            syms.append(s)
+            raws.append(raw)
         bw.write_bytes(encode_core(chans, syms, ctxs, self.tables, cfg.rans_cfg(n_ch), raws))
 
     def decode_payload(self, br: BitReader, n_frames: int, n_ch: int) -> np.ndarray:
         cfg = self.cfg
         data = br.read_bytes(br.bits_left // 8)
-        chans = [c for _ in self._layout for c in range(n_ch)]
-        ctxs = [k for _, k, _ in self._layout for _ in range(n_ch)]
+        order = coding_order(cfg, n_ch)
+        chans = [c for c, _ in order]
+        ctxs = [self._layout[j][1] for _, j in order]
         syms, raws = decode_core_raw(data, chans, ctxs, self.tables, cfg.rans_cfg(n_ch),
                                      cfg.esc, cfg.esc_bytes)
+        pos = {cj: i for i, cj in enumerate(order)}     # (channel, j) -> coding position
         out = np.empty((n_frames, n_ch), dtype=np.int64)
         B = cfg.block_len
         for c in range(n_ch):
@@ -347,7 +356,7 @@ class LossyCodec:
                      for _ in range(cfg.blocks_per_packet)]
             prev = 0
             for j, (b, k, p) in enumerate(self._layout):
-                s, raw = syms[j * n_ch + c], raws[j * n_ch + c]
+                s, raw = syms[pos[c, j]], raws[pos[c, j]]
                 v = unzigzag(int.from_bytes(raw, "little")) if s == cfg.esc else s - cfg.s_max
                 if k == 0:
                     v = prev = v + (prev if p else 0)

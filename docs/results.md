@@ -17,24 +17,28 @@ lists them in `KNOWN_FAIL`, so they are reported without failing the run.
 | F2 | **Disable mid-packet leaves an unterminated packet at the host.** The host already has the header and first bytes; the next run's packet 0 is appended (668 = 15 + 653 bytes). Clearing the FIFO would not help: the pins need an abort signal | T-IF-3b, T-ROB-2, T-ROB-3 | C-IF-6/7 |
 | F3 | **A host stall corrupts that packet and every later one, with no recovery.** The core `overflow` pin stays 0. A 300-clock stall during the flush is absorbed | T-OVF-1/2/3 | C-OVF-1..3 (D3) |
 | F4 | **One short frame misaligns the channels for good.** Long frames and a missing `s_frame` recover | T-ROB-4 | C-IF-8 |
-| F5 | **Worst-case host speed: one byte every 11 clocks (2.2 us).** LFSR data codes at 21.4 bits/sample (3.36 Mbit/s); 12 clocks/byte loses data | T-BW-1/2 | C-BW-2/3 |
+| F5 | **Worst-case host speed: one byte every 4 clocks (0.8 us)** since the eager drain (was 11): worst-case frames carry up to 101 bytes (was 45). LFSR average 21.4 bits/sample (3.36 Mbit/s) unchanged; real data is smoother than before (peak 30 bytes/frame, was 40). Accepted 2026-10-08 (C-BW-3) | T-BW-1/2 | C-BW-2/3 |
 | F6 | Random power-up contents in all 234 no-reset registers: identical output | T-ROB-5 | C-FN-6 |
 | F7 | Power was 98% flip-flop clock pins (618 of 629 uW, also when idle). Fixed by clock gating (F11) | T-PWR-1 | C-PWR-1/2 |
 | F8 | Critical path 61.9 ns at ss: fine at 200 ns, fails TT's old 20 ns default | T-STA-1 | C-TIM-1 |
 | F9 | Yosys and Icarus disagreed on signed SystemVerilog (7,033 vs 670 bytes); fixed with explicit bit slices, now a coding rule | T-GL-1 | C-RTL-2 |
 | F11 | **Two-level clock gating: 628.5 -> 9.5 uW op, 618 -> 0.8 uW idle, 128k -> 77k um^2.** 159 `dlclkp` gates; per-channel rows, FIFO slots and coder registers only see an edge when written, parent gates only when their block has work, async clear of the control state so `enable` = 0 stops all clock edges. Gating also removes the enable muxes (`edfxtp` 30 -> `dfxtp` 20 um^2) | T-PWR-1, T-GL-1/2 | C-PWR-1/2 |
-| F12 | **The TT top is now the power bottleneck and is not measured:** 216 flops outside the core (`nlc_cfg`, output FIFO, pin and config registers, `slot_sel`) clocked every cycle, ~50 uW estimated (0.23 uW/flop) | - | C-PWR-1 |
+| F12 | The TT top was the power bottleneck and unmeasured: 216 flops outside the lossy core clocked every cycle (~50 uW estimated). Fixed: gated (F11 pattern) and measured at system level (T-PWR-2, F14) | T-PWR-2 | C-PWR-1 |
+| F13 | **Eager FIFO drain (format change): the coder takes each burst as soon as it is pushed** (frame, channel, push order) instead of one symbol per channel per sample. Per-channel storage 8 -> 4 entries in fixed slots, no ring pointers: 2,127 -> 1,671 flops, 76.9k -> 62.2k um^2. Packet sizes identical (order only); processing latency 1,997 -> 1,846 us; T-IF-3b now passes (nothing of the next packet is out when it disables) | T-CHG-7, all | C-AREA, C-LAT-1 |
+| F15 | **Second gating/area round:** slot selector split gating, issuer operand isolation on empty-burst frames, a lossy grandparent gate, children under parent gates (idle), burst slots narrowed to 8/10/11/13 bits, serialiser reads the coder's word in place (no `sbuf`). Lossy core 62.2k -> 59.2k um^2, 1,671 -> 1,573 flops, op 9.34 -> 8.07 uW, worst 11.1 -> 8.7 uW, idle 0.77 -> 0.16 uW; host requirement unchanged (4) | all | C-PWR, C-AREA |
+| F16 | Gate-level only: the output FIFO's pointers stayed X after reset (`m_valid` = X, TT top and `nlc_core` gate-level runs failed) while RTL with the real gate model passed. A synchronous reset synthesised as `!((Q & r) or !(Q or r'))` is 0 in reset, but the cell models cannot resolve the reconvergent X. Fixed with asynchronous resets (C-RTL-3) | T-GL-2, T-PWR-2 | C-RTL-3 |
+| F14 | **System power measured (`nlc_core` gate level, real interface): 15.9 uW op, 2.5 uW idle** (target 16 / 2) | T-PWR-2 | C-PWR-1/2 |
 | F10 | **The coder pipeline was 547 of the 2,681 flops for nothing.** The coder sees at most 8 symbols per 256 clocks. With the 10-step divider combinational (`DIV_REG` = 0), there are 2,134 flops, 110 ns slack at ss / 200 ns, and a deepest path of 121 cells (< 200 for TT's unit-delay gate sim). Output bytes are identical. The other ~1,950 flops are per-channel state, which re-timing can't remove | sweep below | C-TIM-1/4 |
 
 ## Budgets
 
 | metric | value | limit / target | status |
 |---|---|---|---|
-| lossy core area | 76,900 um^2 (2,127 flops + 159 clock gates) | 173,000 / 86,600 | PASS |
+| lossy core area | 62,200 um^2 (1,671 flops + 127 clock gates) | 173,000 / 86,600 | PASS |
 | TT design utilisation (8x2) | 48% | 70% / 60% | PASS |
 | setup slack, ss, 200 ns | +138 ns | >= 0 / 60 | PASS |
-| power, real data | 9.5 uW (lossy core; was 628.6) | 40 / 16 | PASS |
-| power, idle | 0.77 uW (simulated, `enable` = 0; was 617.8) | 10 / 2 | PASS |
+| power, real data | lossy core 9.3 uW (was 628.6); `nlc_core` 15.9 uW | 40 / 16 | PASS |
+| power, idle | lossy core 0.77 uW (was 617.8); `nlc_core` 2.5 uW | 10 / 2 | PASS / WARN |
 | processing latency | 2.0 ms | 1 / 0.41 ms | FAIL (F1) |
 | delivery latency | 13.4 ms | 40 / 20 ms | PASS |
 | bits/sample, 160 held-out files | 2.087 | 2.2 / 2.1 | PASS |

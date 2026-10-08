@@ -46,7 +46,7 @@ Results: `reports/latest/summary.md`, `reports/latest/metrics.json`, logs and ne
 | `test/core` | `nlc_core` (slot selector, encoder, output FIFO, config) at the real interface: 256 slots, one per clock, 200 ns | T-IF-1/2/3, T-BW-1/2, T-OVF-1/2/3, T-ROB-1..6 (42 cases; T-ROB-1 needs `NLC_LONG=1`) | environment `test/env/nlc_env.py` (4.1): ADC mux, config port, host model, scoreboard by seq, monitors for latency/bandwidth/coverage; one JSON per test in `$NLC_RESULTS` |
 
 The TT-top suite now runs at 200 ns (D2), one slot every 2 clocks, 32-slot frames (64 clocks,
-C-IF-9); modes 0/2/3 skip with reason D1 except under `ENCODER=replay`. `make GATES=local
+C-IF-9); lossy only (D1: the modes 0/2/3 tests and vectors were removed). `make GATES=local
 NETLIST=reports/latest/top_netlist.v` runs it on our Yosys netlist (T-GL-2). `test/lossy` adds the
 power scenarios of 4.4 (`test_power_op/n4/worst/floor`), `gl_dump.v` takes `+vcd_start=<ns>`.
 
@@ -74,6 +74,9 @@ power scenarios of 4.4 (`test_power_op/n4/worst/floor`), `gl_dump.v` takes `+vcd
 | 2026-10-07 | `test/core` (42 cases, 25 min, `nlc_core` at 256 slots, 1 slot/clock, 200 ns) | 31 pass, 10 fail, 1 skip. All failures are findings F2-F4 ([results.md](results.md)) |
 | 2026-10-07 | TT top at 200 ns, 1 slot / 2 clocks, 64-clock frames (T-IF-4); same on the Yosys TT-top netlist (T-GL-2) | pass; pass (277 s) |
 | 2026-10-07 | `test/lossy` power scenarios in RTL; `op` at gate level (2 packets from frame 64) | pass; 628.6 uW (unchanged: still 98% flop clock pins) |
+| 2026-10-08 | `test/core` on the clock-gated RTL (5a94b62), parallel runner (6 jobs, 10 min instead of ~25) | 34/46 pass, 0 unexpected; the 12 failures are the known D5-D7 requirement tests |
+| 2026-10-08 | **intended format change, T-CHG-7 golden accepted:** eager FIFO drain, symbols coded frame by frame, channel by channel, burst in push order (`nlc.lossy.coding_order`) instead of j-major | packet sizes unchanged (synthetic 730/729, lfsr 5510/5445 bytes): only the byte order differs |
+| 2026-10-08 | full check (model, lint, rtl, core, synth, sta, gl, power; 17.8 min with the parallel runner) on eager drain + gated TT top | all pass except T-ROB-5 (test deposited into renamed registers; fixed: it now finds every `nlc_greg`, 189 registers, 3/3 pass); new T-PWR-2 (`t_pwr_op`/`t_pwr_idle`, `nlc_core` gate level): 15.9 / 2.5 uW |
 
 Findings F1-F9, budgets and the measured data: [results.md](results.md).
 
@@ -265,8 +268,7 @@ Must be hit across the regression (T-ROB-6 plus the directed tests), otherwise t
 | T2 full | before a design change is accepted; nightly while iterating | `python scripts/check.py`: everything above + GL + STA + area + power matrix + compression on held-out files + random regression (T-ROB-6, 50 seeds) | < 1 h |
 | T3 sign-off | per GDS run | TT `gds`, `gl_test`, precheck; T-GL-3, post-layout power | TT action |
 
-CI rules: modes 0/2/3 TT-top tests are **skipped with reason** "not in silicon (D1)", not
-deleted and not failing. A WARN never fails CI; a FAIL does. Every failing randomised test
+CI rules: A WARN never fails CI; a FAIL does. Every failing randomised test
 prints its seed and a one-line command that reproduces it.
 
 ### 4.7 Order of work

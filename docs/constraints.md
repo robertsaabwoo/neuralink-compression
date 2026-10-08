@@ -12,7 +12,7 @@ Sources: `docs/platform.md` (Neuralink, TT), `docs/budgets.md` (numeric pass/fai
 
 | # | decision | consequence for testing |
 |---|---|---|
-| D1 | **Silicon = lossy mode (1) only.** Modes 0/2/3 stay in the golden model, not in RTL | TT-top tests for modes 0/2/3 are skipped with a reason, not failed; model tests for them stay |
+| D1 | **Silicon = lossy mode (1) only.** Modes 0/2/3 stay in the golden model, not in RTL | The RTL has no registers or tests for modes 0/2/3 (removed 2026-10-08; CTRL's mode bits are ignored); model tests for them stay |
 | D2 | **Clock = ADC slot rate, 5 MHz (200 ns), one slot per clock** | STA, gate-level, power and the TT top are all checked at 200 ns; the 20 ns template default is not a target |
 | D3 | **Output overflow loses whole packets** (no backpressure to the ADC is possible; mechanism: D6) | constraints C-OVF-*: a lost packet must be detectable from the pins and recovery is automatic |
 | D4 | **Power budget is Neuralink-derived**: ~10 uW/channel for compression *and* radio | compressor share: target 2 uW/ch, limit 5 uW/ch (C-PWR-1) |
@@ -81,8 +81,8 @@ measure different things (platform.md section 3). Both are tracked:
 | ID | constraint | value | source | tests |
 |---|---|---|---|---|
 | C-BW-1 | Typical output rate on real data | ~326 kbit/s (2.087 b/sample x 8 ch x 19.53 kHz) | derived | T-BW-1 |
-| C-BW-2 | Worst-case output rate over any frame and any packet (LFSR noise, full-scale square waves, escapes on every symbol), and the worst burst (packet flush) | **measured**: LFSR 21.4 bits/sample = 3.36 Mbit/s, up to 45 bytes/frame, flush 30 bytes (real data: 325 kbit/s, 27-byte flush) | T-BW-1, 2026-10-07 | T-BW-1 |
-| C-BW-3 | Host requirement, published in the README/datasheet: the slowest host turnaround (clocks per byte) at which worst-case data gives no overflow | **measured: 11 clocks/byte (2.2 us at 5 MHz)** on LFSR data, 2 packets; 12 loses data (estimate was <= 8) | T-BW-2, 2026-10-07 | T-BW-2 |
+| C-BW-2 | Worst-case output rate over any frame and any packet (LFSR noise, full-scale square waves, escapes on every symbol), and the worst burst (packet flush) | **measured**: LFSR 21.4 bits/sample = 3.36 Mbit/s, up to **101 bytes/frame** since the eager FIFO drain (was 45: bursts are now coded in the frame they are pushed), flush 28 bytes (real data: 325 kbit/s, peak 30 bytes/frame) | T-BW-1, 2026-10-08 | T-BW-1 |
+| C-BW-3 | Host requirement, published in the README/datasheet: the slowest host turnaround (clocks per byte) at which worst-case data gives no overflow | **measured: 4 clocks/byte (0.8 us at 5 MHz)** on LFSR data, 2 packets; 5 loses data. Was 11 before the eager FIFO drain; accepted by the user 2026-10-08: the real consumer is on-chip (~1 byte/clock), and 4 is about the TT pin protocol's own limit (2 clocks after each m_ack edge) | T-BW-2, 2026-10-08 | T-BW-2 |
 | C-BW-4 | Radio budget context (informational): 1 Mbps for 1024 channels = ~980 bit/s/ch; lossy is ~40 kbit/s/ch, i.e. only a few broadband channels fit | derived [3] | T-ALG-2 report |
 
 ## 6. Timing (sky130_fd_sc_hd, pre-layout then TT sign-off)
@@ -136,6 +136,7 @@ bit has no source (platform.md section 1), so ratios that depend on it are infor
 |---|---|---|---|
 | C-RTL-1 | Verilator lint: 0 errors; `-Wall` clean on the lossy core | TT's flow lints; errors stop the GDS build | T-LINT-1 |
 | C-RTL-2 | No signed casts, `>>>` or signed compares in synthesised code; write sign handling as explicit bit slices | Yosys and Icarus disagreed (7,033 vs 670 bytes) | T-GL-1, T-EQ-1 |
+| C-RTL-3 | Control registers behind a clock gate reset asynchronously; storage without reset uses `nlc_greg`. A synchronous reset synthesised through logic can stay X in gate-level simulation (X-pessimism on reconvergent logic, F16), and it would also hold the gate open | output FIFO pointers stayed X at gate level, 2026-10-08 | T-GL-2, T-PWR-2 |
 | C-RTL-3 | All synthesised files listed in `info.yaml`, `test/Makefile` and `LOSSY_SRC` in `scripts/flow/flow.py` | the three lists drift | T-INF-2 |
 
 ## Sources

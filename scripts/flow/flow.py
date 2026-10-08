@@ -34,6 +34,7 @@ import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -49,8 +50,8 @@ LIB = {"tt": PDK / "lib/sky130_fd_sc_hd__tt_025C_1v80.lib",
 LOSSY_SRC = ["nlc_lossy.sv", "nlc_lift53.sv", "nlc_rans.sv", "nlc_lossy_rom.v", "nlc_icg.sv"]
 STEPS = ["model", "lint", "rtl", "core", "synth", "area", "sta", "gl", "power", "compress", "algo"]
 AREA_SWEEP = [2, 4, 8, 16]    # N_SEL values for T-AREA-2 (SEL_W >= 1, so no N_SEL = 1)
-# TT top-level tests for modes not in silicon (D1): skipped by the tests themselves
-PENDING_TESTS = {"test_lossless", "test_binned", "test_sbp", "test_lossless_host_never_waits"}
+# TT top-level tests for modes not in silicon (D1): none since the RTL is lossy only
+PENDING_TESTS: set[str] = set()
 # test/core tests that fail on today's RTL; name prefix -> reason (docs/testing.md section 3).
 # A prefix may cover cases that pass (e.g. a stall short enough to be absorbed).
 _ABORT = ("F2: disable mid-packet must end the packet with the abort token (D7); "
@@ -61,11 +62,11 @@ _FRAME = ("F4: a short frame must repeat the missing channels' previous samples 
           "today the channel order slips for good")
 KNOWN_FAIL = {
     "t_ovf_1": _OVF, "t_ovf_2": _OVF, "t_rob_4": _FRAME,     # t_rob_4 long/missing pass
-    "t_if_3_reenable": _ABORT, "t_rob_2": _ABORT, "t_rob_3": _ABORT,
+    "t_rob_2": _ABORT, "t_rob_3": _ABORT,
 }
 # functional coverage bins the T2 regression must hit (docs/testing.md 4.5)
 COVERAGE_BINS = ([f"esc_ctx{c}" for c in range(4)] + ["esc_consecutive", "esc_last_symbol"]
-                 + [f"occ_{k}" for k in range(8)]
+                 + [f"occ_{k}" for k in (1, 2, 4)]     # burst buffer after a push
                  + ["rans_hazard_stall", "back_to_back_same_channel"]
                  + [f"coder_word_bytes_{k}" for k in range(5)]
                  + ["flush_overlaps_samples", "out_fifo_full", "host_stall_header",
@@ -77,6 +78,8 @@ POWER_SCENARIOS = {   # name: (test in test/lossy, VCD start in frames: skip sta
     "op": ("test_power_op", 64), "op4": ("test_power_n4", 64),
     "worst": ("test_power_worst", 64), "floor": ("test_power_floor", 0),
     "idle": ("test_power_idle", 0)}
+# T-PWR-2: the whole core (config, slot selector, encoder, output FIFO) at the real interface
+CORE_POWER_SCENARIOS = {"core_op": ("t_pwr_op", 64), "core_idle": ("t_pwr_idle", 0)}
 
 BUDGETS = json.loads((HERE / "budgets.json").read_text())
 OP = BUDGETS["operating_point"]
@@ -169,16 +172,91 @@ def _cocotb(r: Run, cwd: Path, log: str, make_args: str = "") -> list[tuple[str,
     return res
 
 
+# Parallel cocotb: compile once, then run jobs (one test case, or one runtime variant
+# such as a clock period) as separate simulator processes from a work queue, longest
+# first (durations of the last run in <suite>/.durations.json). Icarus is single
+# threaded; NLC_JOBS processes (default CPUs - 2) share one container.
+JOBS = int(os.environ.get("NLC_JOBS", max(1, (os.cpu_count() or 2) - 2)))
+
+
+def list_tests(cwd: Path, modules: str) -> list[str]:
+    """Full names of the cocotb tests in <cwd>/<module>.py (comma-separated modules)
+    that are not skipped."""
+    code = ("import importlib, sys; sys.path[:0] = [{cwd!r}, {env!r}]\n"
+            "for m in {mods!r}:\n"
+            "    for v in vars(importlib.import_module(m)).values():\n"
+            "        if type(v).__name__ == 'TestGenerator':\n"
+            "            for c in v.generate_tests():\n"
+            "                if not c.skip: print(c.fullname)\n").format(
+        cwd=str(cwd), env=str(ROOT / "test/env"), mods=modules.split(","))
+    p = subprocess.run([sys.executable, "-c", code], cwd=cwd, capture_output=True, text=True,
+                       env={**os.environ, "PYTHONPATH": f"{cwd}:{ROOT / 'test/env'}"})
+    return p.stdout.split()
+
+
+def cocotb_jobs(r: Run, cwd: Path, tag: str, build: str,
+                jobs: list[tuple[str, str, str]]) -> dict[str, list[tuple[str, bool]]]:
+    """Build <cwd> once with make args `build`, then run jobs (name, filter regex, extra
+    make args) in parallel. Logs: <tag>_build.log and <tag>/<name>.log in the report."""
+    shutil.rmtree(cwd / "sim_build", ignore_errors=True)
+    logs = r.out / tag
+    logs.mkdir(exist_ok=True)
+    tmp = cwd / "sim_build" / "results"
+    code, _ = r.sh(f"make {build} COCOTB_TEST_FILTER=__build_only__ "
+                   f"COCOTB_RESULTS_FILE={cwd / 'sim_build' / 'build.xml'}", f"{tag}_build.log", cwd=cwd)
+    vvps = [p.relative_to(cwd) for p in (cwd / "sim_build").rglob("sim.vvp")]
+    if not vvps:
+        r.failed_tests.append(f"{tag}: build failed (see {tag}_build.log)")
+        return {}
+    # jobs never rebuild, even if a source changes during the run (make -o: "old file")
+    build = build + "".join(f" -o {p.as_posix()}" for p in vvps)
+    tmp.mkdir(parents=True, exist_ok=True)
+    dur_file = cwd / ".durations.json"
+    try:
+        durations = json.loads(dur_file.read_text())
+    except (OSError, ValueError):
+        durations = {}
+    order = sorted(jobs, key=lambda j: -durations.get(j[0], 1e9))   # unknown first, then longest
+
+    def run(job):
+        name, filt, extra = job
+        safe = re.sub(r"[^\w.=-]+", "_", name)
+        xml = tmp / f"{safe}.xml"
+        t0 = time.time()
+        r.sh(f"make {build} {extra} COCOTB_RESULTS_FILE={xml}", f"{tag}/{safe}.log", cwd=cwd,
+             env={"COCOTB_TEST_FILTER": filt})
+        return name, junit(xml), time.time() - t0
+
+    out = {}
+    with ThreadPoolExecutor(max_workers=JOBS) as pool:
+        for name, res, dt in pool.map(run, order):
+            out[name] = res
+            durations[name] = round(dt, 1)
+            if not res:
+                r.failed_tests.append(f"{tag} {name}: no results (see {tag}/)")
+    dur_file.write_text(json.dumps(durations, indent=1, sort_keys=True))
+    return out
+
+
+def cocotb_parallel(r: Run, cwd: Path, tag: str, module: str, build: str = "",
+                    only: str = "") -> list[tuple[str, bool]]:
+    """All (non-skipped) tests of a suite, one job per test case; `only` = regex filter."""
+    names = [n for n in list_tests(cwd, module) if re.search(only, n)]
+    res = cocotb_jobs(r, cwd, tag, build, [(n, f"^{re.escape(n)}$", "") for n in names])
+    return [t for n in names for t in res.get(n, [])]
+
+
 def step_rtl(r: Run) -> None:
     summary = {}
-    for name, cwd, args in [("lossy", ROOT / "test/lossy", ""),
-                            ("rans_static", ROOT / "test/rans", "TOP=static"),
-                            ("rans_adaptive", ROOT / "test/rans", "TOP=adaptive")]:
-        res = _cocotb(r, cwd, f"rtl_{name}.log", args)
+    res = cocotb_parallel(r, ROOT / "test/lossy", "rtl_lossy", "test_lossy")
+    summary["lossy"] = f"{sum(ok for _, ok in res)}/{len(res)}"
+    r.failed_tests += [f"rtl lossy: {n}" for n, ok in res if not ok]
+    for name, args in [("rans_static", "TOP=static"), ("rans_adaptive", "TOP=adaptive")]:
+        res = _cocotb(r, ROOT / "test/rans", f"rtl_{name}.log", args)   # seconds each
         summary[name] = f"{sum(ok for _, ok in res)}/{len(res)}"
         r.failed_tests += [f"rtl {name}: {n}" for n, ok in res if not ok]
     r.sh("python scripts/gen_vectors.py --out test/vectors", "rtl_top_vectors.log")
-    res = _cocotb(r, ROOT / "test", "rtl_top.log")
+    res = cocotb_parallel(r, ROOT / "test", "rtl_top", "test_plumbing,test_modes")
     for n, ok in res:
         if not ok and n in PENDING_TESTS:
             r.pending_tests.append(n)
@@ -190,8 +268,8 @@ def step_rtl(r: Run) -> None:
 
 def step_core(r: Run, quick: bool) -> None:
     res_dir = r.out / "core"
-    filt = "COCOTB_TEST_FILTER=t_if_[13]" if quick else ""
-    res = _cocotb(r, ROOT / "test/core", "rtl_core.log", f"NLC_RESULTS={res_dir} {filt}")
+    res = cocotb_parallel(r, ROOT / "test/core", "rtl_core", "test_core",
+                          build=f"NLC_RESULTS={res_dir}", only="t_if_[13]" if quick else "")
     known = []
     for n, ok in res:
         why = next((w for k, w in KNOWN_FAIL.items() if n.startswith(k)), None)
@@ -280,15 +358,23 @@ def step_synth(r: Run) -> None:
         "lossy": ("nlc_lossy", LOSSY_SRC, "-flatten", True),
         "lossy_hier": ("nlc_lossy", LOSSY_SRC, "", False),
         "top": (top, srcs, "-flatten", True),
+        # the system without the TT pin glue (project.v): power scenario T-PWR-2
+        "core": ("nlc_core", [f for f in srcs if f != "project.v"], "-flatten", True),
     }
-    for name, (mod, files, flat, netlist) in jobs.items():
+
+    def synth(item):
+        name, (mod, files, flat, netlist) = item
         extra = NETLIST_EXTRA.format(netlist=r.out / f"{name}_netlist.v") if netlist else ""
         script = SYNTH.format(src=src, files=" ".join(str(src / f) for f in files), top=mod,
                               flatten=flat, lib=lib, extra=extra, stat=r.out / f"{name}_stat.txt")
         (r.out / f"synth_{name}.ys").write_text(script)
         code, _ = r.sh(f"yosys -q -s {r.out / f'synth_{name}.ys'}", f"synth_{name}.log")
-        if code:
-            r.failed_tests.append(f"synthesis {name} (see synth_{name}.log)")
+        return name, code
+
+    with ThreadPoolExecutor(max_workers=JOBS) as pool:
+        for name, code in pool.map(synth, jobs.items()):
+            if code:
+                r.failed_tests.append(f"synthesis {name} (see synth_{name}.log)")
     stat = (r.out / "lossy_stat.txt").read_text()
     area, cells, flops = _area(stat)
     r.metrics["lossy_cell_area_um2"] = area
@@ -400,12 +486,24 @@ def step_gl(r: Run) -> None:
     if not net.exists():
         r.notes.append("gl: lossy_netlist.v missing (run synth)")
         return
-    for tag, clk, filt, plus in [("op", OP["clock_period_ns"], "test_power_window", ""),
-                                 ("tt_clock", OP["tt_clock_period_ns"], "test_power_window", "")]:
-        res = _cocotb(r, ROOT / "test/lossy", f"gl_{tag}.log",
-                      f"GATES=yes NETLIST={net} CLK_NS={clk} COCOTB_TEST_FILTER={filt} "
-                      f"PLUSARGS={plus}" if plus else
-                      f"GATES=yes NETLIST={net} CLK_NS={clk} COCOTB_TEST_FILTER={filt}")
+    top_net = r.out / "top_netlist.v"            # T-GL-2: the TT top through the pins
+
+    def gl_top():
+        if not top_net.exists():
+            return None
+        shutil.rmtree(ROOT / "test/sim_build/gl_local", ignore_errors=True)
+        return _cocotb(r, ROOT / "test", "gl_top.log",
+                       f"GATES=local NETLIST={top_net} CLK_NS={OP['clock_period_ns']} "
+                       "COCOTB_TEST_FILTER='test_lossy$'")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        top_res = pool.submit(gl_top)
+        lossy = cocotb_jobs(r, ROOT / "test/lossy", "gl", f"GATES=yes NETLIST={net}", [
+            (tag, "test_power_window", f"CLK_NS={clk}")
+            for tag, clk in [("op", OP["clock_period_ns"]), ("tt_clock", OP["tt_clock_period_ns"])]])
+        top_res = top_res.result()
+    for tag in ("op", "tt_clock"):
+        res = lossy.get(tag, [])
         ok = bool(res) and all(o for _, o in res)
         if tag == "op" and not ok:
             r.failed_tests.append("gate-level lossy (bytes differ from the model)")
@@ -416,13 +514,8 @@ def step_gl(r: Run) -> None:
                     f"gate-level sim with TT's unit delays (#1 per cell) fails at "
                     f"{OP['tt_clock_period_ns']} ns: TT's gl_test action would fail unless the "
                     "testbench clock is slower than the deepest logic path (in cells x 1 ns)")
-    top_net = r.out / "top_netlist.v"            # T-GL-2: the TT top through the pins
-    if top_net.exists():
-        shutil.rmtree(ROOT / "test/sim_build/gl_local", ignore_errors=True)
-        res = _cocotb(r, ROOT / "test", "gl_top.log",
-                      f"GATES=local NETLIST={top_net} CLK_NS={OP['clock_period_ns']} "
-                      f"COCOTB_TEST_FILTER=test_lossy")
-        ok = bool(res) and all(o for _, o in res)
+    if top_res is not None:
+        ok = bool(top_res) and all(o for _, o in top_res)
         r.info["gl_top_ok"] = ok
         if not ok:
             r.failed_tests.append("gate-level TT top (T-GL-2, see gl_top.log)")
@@ -430,7 +523,7 @@ def step_gl(r: Run) -> None:
 
 POWER = """read_liberty {lib}
 read_verilog {netlist}
-link_design nlc_lossy
+link_design {top}
 create_clock -name clk -period {period} [get_ports clk]
 set_power_activity -input -activity 0
 {activity}
@@ -450,18 +543,53 @@ def _power(text: str) -> dict[str, dict[str, float]]:
     return out
 
 
-def _scenario_vcd(r: Run, net: Path, name: str) -> Path | None:
-    """Gate-level run of one power scenario (docs/testing.md 4.4) at the operating clock."""
-    test, start_frames = POWER_SCENARIOS[name]
-    vcd = r.out / f"power_{name}.vcd"
+def _scenario_vcds(r: Run, cwd: Path, net: Path, tag: str,
+                   scenarios: dict[str, tuple[str, int]]) -> dict[str, Path]:
+    """Gate-level runs of power scenarios (docs/testing.md 4.4) at the operating clock, in
+    parallel on one build of the netlist. Returns the VCD of each scenario that passed."""
     period = OP["clock_period_ns"]
-    start_ns = int(start_frames * 256 * period)
-    res = _cocotb(r, ROOT / "test/lossy", f"gl_power_{name}.log",
-                  f"GATES=yes NETLIST={net} CLK_NS={period} COCOTB_TEST_FILTER={test} "
-                  f"PLUSARGS='+vcd={vcd} +vcd_start={start_ns}'")
-    if not (res and all(o for _, o in res)):
-        r.failed_tests.append(f"gate-level power scenario {name} (see gl_power_{name}.log)")
-    return vcd if vcd.exists() else None
+    jobs = []
+    for name, (test, start_frames) in scenarios.items():
+        vcd = r.out / f"power_{name}.vcd"
+        jobs.append((name, f"{test}$", f"CLK_NS={period} "
+                     f"PLUSARGS='+vcd={vcd} +vcd_start={int(start_frames * 256 * period)}'"))
+    res = cocotb_jobs(r, cwd, tag, f"GATES=yes NETLIST={net}", jobs)
+    out = {}
+    for name in scenarios:
+        vcd = r.out / f"power_{name}.vcd"
+        if not (res.get(name) and all(o for _, o in res[name])):
+            r.failed_tests.append(f"gate-level power scenario {name} (see {tag}/)")
+        elif vcd.exists():
+            out[name] = vcd
+    return out
+
+
+def _report_power(r: Run, net: Path, top: str, tag: str, activity: str) -> dict:
+    tcl = POWER.format(lib=LIB["tt"], netlist=net, top=top, period=OP["clock_period_ns"],
+                       activity=activity)
+    (r.out / f"power_{tag}.tcl").write_text(tcl)
+    _, text = r.sh(f"sta -no_splash -exit {r.out / f'power_{tag}.tcl'}", f"power_{tag}.log")
+    lost = len(re.findall(r"^Warning \d+: .* not found", text, re.M))
+    if lost:
+        r.failed_tests.append(f"power {tag}: {lost} activity annotations not applied "
+                              f"(see power_{tag}.log)")
+    return _power(text)
+
+
+def step_power_core(r: Run, vcds: dict[str, Path]) -> None:
+    """T-PWR-2: nlc_core at gate level (everything but the TT pin glue)."""
+    net = r.out / "core_netlist.v"
+    res = {}
+    for name, vcd in vcds.items():
+        act_f, act_r = r.out / f"activity_{name}.tcl", r.out / f"activity_{name}_raw.tcl"
+        r.info[f"activity_annotation_{name}"] = activity_tcl(net, vcd, LIB["tt"], act_f, act_r)
+        res[name] = _report_power(r, net, "nlc_core", name, f"source {act_f}")
+        vcd.unlink()
+    for name, metric in [("core_op", "core_power_uw"), ("core_idle", "core_power_idle_uw")]:
+        if "Total" in res.get(name, {}):
+            r.metrics[metric] = res[name]["Total"]["total"]
+    r.info["core_power_uw"] = {k: {g: round(v["total"], 2) for g, v in d.items() if v["total"]}
+                               for k, d in res.items()}
 
 
 def step_power(r: Run, quick: bool = False) -> None:
@@ -469,15 +597,20 @@ def step_power(r: Run, quick: bool = False) -> None:
     if not net.exists():
         r.notes.append("power: lossy_netlist.v missing (run synth)")
         return
-    period = OP["clock_period_ns"]
     results = {}
     # idle (enable = 0) is simulated too: with clock gating, what toggles depends
     # on the gate enables, which OpenSTA cannot infer without activity
     runs = []
-    for name in (["op", "idle"] if quick else list(POWER_SCENARIOS)):
-        vcd = _scenario_vcd(r, net, name)
-        if vcd is None:
-            continue
+    names = ["op", "idle"] if quick else list(POWER_SCENARIOS)
+    core_net = r.out / "core_netlist.v"
+    with ThreadPoolExecutor(max_workers=1) as pool:       # both suites' gate-level runs at once
+        core = pool.submit(_scenario_vcds, r, ROOT / "test/core", core_net, "gl_power_core",
+                           CORE_POWER_SCENARIOS) if core_net.exists() else None
+        vcds = _scenario_vcds(r, ROOT / "test/lossy", net, "gl_power",
+                              {n: POWER_SCENARIOS[n] for n in names})
+        core_vcds = core.result() if core else {}
+    step_power_core(r, core_vcds)
+    for name, vcd in vcds.items():
         # activities are per operating cycle (the VCD comes from a run at the operating clock)
         act_f, act_r = r.out / f"activity_{name}.tcl", r.out / f"activity_{name}_raw.tcl"
         r.info[f"activity_annotation_{name}"] = activity_tcl(net, vcd, LIB["tt"], act_f, act_r)
@@ -487,14 +620,7 @@ def step_power(r: Run, quick: bool = False) -> None:
         else:
             vcd.unlink()                                    # ~100 MB each; keep op only
     for tag, activity in runs:
-        tcl = POWER.format(lib=LIB["tt"], netlist=net, period=period, activity=activity)
-        (r.out / f"power_{tag}.tcl").write_text(tcl)
-        _, text = r.sh(f"sta -no_splash -exit {r.out / f'power_{tag}.tcl'}", f"power_{tag}.log")
-        results[tag] = _power(text)
-        lost = len(re.findall(r"^Warning \d+: .* not found", text, re.M))
-        if lost:
-            r.failed_tests.append(f"power {tag}: {lost} activity annotations not applied "
-                                  f"(see power_{tag}.log)")
+        results[tag] = _report_power(r, net, "nlc_lossy", tag, activity)
     if "Total" in results.get("idle", {}):
         r.metrics["power_idle_uw"] = results["idle"]["Total"]["total"]
     if "Total" in results.get("worst", {}):
