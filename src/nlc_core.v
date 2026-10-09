@@ -47,8 +47,12 @@ module nlc_core #(
   wire [SEL_W:0]      n_sel;
   wire [8*N_SEL-1:0]  sel_slots;
 
+  // The config registers' own gate (enable cfg_we) hangs off clk, not clk_core (cfg_we is
+  // one of clk_core's enables, so this is the same clock): the same gate depth as the TT pin
+  // registers that feed them, so CTS without latency balancing needs no hold buffers on
+  // the 64-bit slot table (area experiment G, docs/results.md).
   nlc_cfg #(.N_SEL(N_SEL)) u_cfg (
-      .clk(clk_core), .rst_n(rst_n),
+      .clk(clk), .rst_n(rst_n),
       .cfg_we(cfg_we), .cfg_addr(cfg_addr), .cfg_data(cfg_data),
       .enable(enable), .n_sel(n_sel), .sel_slots(sel_slots)
   );
