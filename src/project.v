@@ -32,35 +32,64 @@ module tt_um_nlc_compressor (
     input  wire       rst_n
 );
 
-  // register all inputs once at the pads
-  reg [7:0] ui_q;
-  reg [7:0] uio_q;
-  reg       strobe_q;
-  reg       ack_q;
+  // Inputs are registered once at the pads, in three clock groups (power: the TT pins are
+  // the only registers that would otherwise clock every cycle, docs/results.md F19/F20):
+  //   every clock     the strobe, ack and cfg_en levels and the edge detectors
+  //   every strobe    the frame flag (the slot selector reads it on every slot)
+  //   selected slots  the sample / config byte: read only on a hit or a config write, so it
+  //                   loads only on a strobe of a selected slot (s_want), a frame strobe or
+  //                   a config strobe. s_want comes from registered state of the slot
+  //                   selector, valid for the next strobe (>= 2 clocks per slot, C-IF-9).
+  // CTS pads registers that share a clock net with clock gates (F19), so every group has
+  // its own gate (the first one always on).
+  reg       stb_q, ackl_q, cfgen_q;   // pin levels: s_strobe, m_ack, cfg_en
+  reg       strobe_q, ack_q;          // previous levels (edge detect)
+  reg       frame_q;                  // s_frame
+  reg [7:0] ui_q;                     // sample[7:0] / config byte
+  reg [1:0] hi_q;                     // sample[9:8]
+  wire      s_want;                   // from the core: the next slot strobe is selected
 
-  // Registers sharing a clock net with clock gates get their own always-on gate: CTS pads
-  // registers that sit next to gates with latency delay buffers (docs/results.md F19).
-  // The pin registers sample every cycle (the gate is always on).
-  wire clk_pins;
-  nlc_icg u_cg_pins (.clk(clk), .en(1'b1), .gclk(clk_pins));
+  wire ld_frame = !rst_n || uio_in[2];
+  wire ld_data  = !rst_n || (uio_in[2] && (uio_in[5] || uio_in[3] || s_want));
+  wire clk_pins, clk_frame, clk_data;
+  nlc_icg u_cg_pins (.clk(clk), .en(1'b1),     .gclk(clk_pins));
+  nlc_icg u_cg_frm  (.clk(clk), .en(ld_frame), .gclk(clk_frame));
+  nlc_icg u_cg_dat  (.clk(clk), .en(ld_data),  .gclk(clk_data));
 
   always @(posedge clk_pins) begin
     if (!rst_n) begin
-      ui_q     <= 8'd0;
-      uio_q    <= 8'd0;
+      stb_q    <= 1'b0;
+      ackl_q   <= 1'b0;
+      cfgen_q  <= 1'b0;
       strobe_q <= 1'b0;
       ack_q    <= 1'b0;
     end else begin
-      ui_q     <= ui_in;
-      uio_q    <= uio_in;
-      strobe_q <= uio_q[2];
-      ack_q    <= uio_q[4];
+      stb_q    <= uio_in[2];
+      ackl_q   <= uio_in[4];
+      cfgen_q  <= uio_in[5];
+      strobe_q <= stb_q;
+      ack_q    <= ackl_q;
     end
   end
 
-  wire strobe = uio_q[2] & ~strobe_q;
-  wire ack    = uio_q[4] & ~ack_q;
-  wire cfg_en = uio_q[5];
+  always @(posedge clk_frame) begin
+    if (!rst_n) frame_q <= 1'b0;
+    else        frame_q <= uio_in[3];
+  end
+
+  always @(posedge clk_data) begin
+    if (!rst_n) begin
+      ui_q <= 8'd0;
+      hi_q <= 2'd0;
+    end else begin
+      ui_q <= ui_in;
+      hi_q <= uio_in[1:0];
+    end
+  end
+
+  wire strobe = stb_q & ~strobe_q;
+  wire ack    = ackl_q & ~ack_q;
+  wire cfg_en = cfgen_q;
 
   // config bytes: address, then data. cfg_addr/cfg_data are clock-gated (written on a
   // config strobe only; read only with cfg_we, so they need no reset).
@@ -96,7 +125,7 @@ module tt_um_nlc_compressor (
 
   nlc_core core (
       .clk(clk), .rst_n(rst_n),
-      .s_valid(strobe & ~cfg_en), .s_frame(uio_q[3]), .s_data({uio_q[1:0], ui_q}),
+      .s_valid(strobe & ~cfg_en), .s_frame(frame_q), .s_data({hi_q, ui_q}), .s_want(s_want),
       .cfg_we(cfg_we), .cfg_addr(cfg_addr), .cfg_data(cfg_data),
       .m_data(m_data), .m_valid(m_valid), .m_last(m_last), .m_abort(m_abort), .m_ready(ack),
       .overflow(overflow)
@@ -106,6 +135,6 @@ module tt_um_nlc_compressor (
   assign uio_out = {m_abort | (m_valid & m_last), m_valid & ~m_abort, 6'b0};
   assign uio_oe  = 8'b1100_0000;
 
-  wire _unused = &{ena, uio_q[7:6], overflow, 1'b0};
+  wire _unused = &{ena, uio_in[7:6], overflow, 1'b0};
 
 endmodule
