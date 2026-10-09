@@ -680,7 +680,10 @@ def step_power(r: Run, quick: bool = False) -> None:
 GDS = ROOT / "data" / "gds"
 PHYS_LINE = re.compile(r"^\s*sky130_fd_sc_hd__(fill|decap|tapvpwrvgnd)_\d+\s+\S+\s*\(\);\s*$", re.M)
 # T-PWR-3 scenarios (test/test_power.py), VCD start in frames of 256 clocks
-LAYOUT_SCENARIOS = {"op": ("t_pwr3_op", 64), "idle": ("t_pwr3_idle", 0)}
+LAYOUT_SCENARIOS = {"op": ("t_pwr3_op", 64), "idle": ("t_pwr3_idle", 0),
+                    # unselected slots carry 0: the chip without the cost of emulating the
+                    # ADC mux over the pins (reported, not budgeted)
+                    "op_quiet": ("t_pwr3_op_quiet", 64), "idle_quiet": ("t_pwr3_idle_quiet", 0)}
 POWER_VECTORS = ("python scripts/gen_vectors.py --out test/vectors --name power --source real "
                  "--n-slots 128 --frames 512 --slots 1 20 21 45 64 100 126 127")
 SLEW_TCL = """{design}

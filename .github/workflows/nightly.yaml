@@ -1,0 +1,159 @@
+# Nightly sweep: many design / LibreLane-config variants through TT's flow (full routed run or
+# post-CTS preview) plus our post-layout tests (T-PWR-3, T-FAN-1), and long RTL regressions.
+# Runs on push to branch `nightly`. The design (src/, info.yaml, test/mock) comes from each
+# entry's `ref`; tooling (scripts/, test/) from this branch, so every entry is measured alike.
+# Entries: sweeps/nightly.json (docs in scripts/ci/nightly_apply.py). Results: the `aggregate`
+# job summary and artifact nightly-table (python scripts/ci/nightly_aggregate.py <dir>).
+# Power here is on synthetic data (the dataset is not public); rerun winners locally on real
+# data: scripts/fetch_gds.py --run <id> (the routed design is in each nightly-<name> artifact).
+name: nightly
+
+on:
+  push:
+    branches: [nightly]
+  workflow_dispatch:
+
+jobs:
+  setup:
+    runs-on: ubuntu-24.04
+    outputs:
+      sweep: ${{ steps.m.outputs.sweep }}
+      rtl: ${{ steps.m.outputs.rtl }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: m
+        run: |
+          echo "sweep=$(python -c "import json; print(json.dumps(json.load(open('sweeps/nightly.json'))['sweep']))")" >> "$GITHUB_OUTPUT"
+          echo "rtl=$(python -c "import json; print(json.dumps(json.load(open('sweeps/nightly.json'))['rtl']))")" >> "$GITHUB_OUTPUT"
+
+  sweep:
+    needs: setup
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        entry: ${{ fromJSON(needs.setup.outputs.sweep) }}
+    env:
+      LIBRELANE_VERSION: "3.0.14"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: design from ${{ matrix.entry.ref }}, overrides
+        run: |
+          echo '${{ toJSON(matrix.entry) }}' > entry.json
+          python scripts/ci/nightly_apply.py entry.json
+      - uses: actions/checkout@v6
+        with:
+          repository: TinyTapeout/tt-support-tools
+          ref: main
+          path: tt
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: install tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y iverilog
+          pip install -r tt/requirements.txt
+          pip install librelane==$LIBRELANE_VERSION
+          pip install -e ".[sim]"
+      - name: LibreLane image
+        run: echo "LIBRELANE_IMAGE=ghcr.io/librelane/librelane:$LIBRELANE_VERSION" >> "$GITHUB_ENV"
+      - name: patched LibreLane image (no latency balancing, not TT-standard)
+        if: matrix.entry.noid
+        run: bash scripts/ci/librelane_no_insertion_delay.sh
+      - name: LibreLane (${{ matrix.entry.flow }})
+        run: |
+          ./tt/tt_tool.py --create-user-config
+          mkdir -p runs/wokwi
+          TO=""
+          if [ "${{ matrix.entry.flow }}" = "preview" ]; then TO="--to OpenROAD.ResizerTimingPostCTS"; fi
+          python -m librelane --docker-no-tty --dockerized --run-tag wokwi \
+            --force-run-dir runs/wokwi --hide-progress-bar $TO src/config_merged.json
+      - name: pack
+        if: always()
+        run: python scripts/fetch_gds.py --pack runs/wokwi || true
+      - name: layout step
+        if: always()
+        run: |
+          PDK_DIR=$(python -c "import json; print(json.load(open('runs/wokwi/resolved.json'))['PDK_ROOT'])")
+          export NLC_PDK="$PDK_DIR/sky130A/libs.ref/sky130_fd_sc_hd"
+          export NLC_STA="$GITHUB_WORKSPACE/scripts/ci/openroad.sh"
+          export NLC_GDS_MATCHES_SRC=1 NLC_JOBS=4
+          chmod +x scripts/ci/openroad.sh
+          python scripts/flow/flow.py --only layout || true
+          cp entry.json reports/latest/entry.json 2>/dev/null || true
+          python scripts/ci/preview_summary.py >> "$GITHUB_STEP_SUMMARY" || true
+      - name: upload
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-${{ matrix.entry.name }}
+          path: |
+            reports/latest/
+            !reports/latest/*.vcd
+            data/gds/
+            entry.json
+            runs/wokwi/*-openroad-cts/cts.rpt
+            runs/wokwi/final/metrics.json
+          if-no-files-found: warn
+
+  rtl:
+    needs: setup
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        job: ${{ fromJSON(needs.setup.outputs.rtl) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: design from ${{ matrix.job.ref }}
+        run: |
+          echo '${{ toJSON(matrix.job) }}' > entry.json
+          python scripts/ci/nightly_apply.py entry.json
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - run: sudo apt-get update && sudo apt-get install -y iverilog && pip install -e ".[sim]"
+      - name: ${{ matrix.job.name }}
+        run: |
+          mkdir -p results
+          for s in ${{ matrix.job.seeds || '0' }}; do
+            ${{ matrix.job.env || '' }} NLC_SEED=$s NLC_RESULTS=$PWD/results/json \
+              make -C test/core COCOTB_TEST_FILTER='${{ matrix.job.filter }}' \
+              COCOTB_RESULTS_FILE=$PWD/results/r_$s.xml > results/log_$s.txt 2>&1 || true
+            python -m cocotb_tools.check_results results/r_$s.xml > results/check_$s.txt 2>&1 \
+              && echo "seed $s: pass" || echo "seed $s: FAIL"
+          done | tee results/summary.txt
+          ! grep -q FAIL results/summary.txt
+      - name: upload
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-rtl-${{ matrix.job.name }}
+          path: results/
+
+  aggregate:
+    needs: [sweep, rtl]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: nightly-*
+          path: art
+      - run: python scripts/ci/nightly_aggregate.py art >> "$GITHUB_STEP_SUMMARY"
+      - run: python scripts/ci/nightly_aggregate.py art --csv nightly.csv > nightly.md
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nightly-table
+          path: |
+            nightly.md
+            nightly.csv

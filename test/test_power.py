@@ -25,13 +25,30 @@ async def t_pwr3_op(dut):
 
 
 @cocotb.test(**TIMEOUT)
+async def t_pwr3_op_quiet(dut):
+    """As t_pwr3_op, unselected slots carry 0 (a host that only moves the data pins for
+    the selected channels): separates the chip from the cost of emulating the ADC mux."""
+    await run_vector_test(dut, "power", filler="zero")
+
+
+@cocotb.test(**TIMEOUT)
 async def t_pwr3_idle(dut):
     """Configured, CTRL enable = 0, ADC strobes keep coming: no output (C-PWR-2)."""
+    await _idle(dut, "random")
+
+
+@cocotb.test(**TIMEOUT)
+async def t_pwr3_idle_quiet(dut):
+    """As t_pwr3_idle, unselected slots carry 0."""
+    await _idle(dut, "zero")
+
+
+async def _idle(dut, filler: str) -> None:
     frames, _, cfg = load_vectors("power")
     pins = await reset(dut)
     for addr, data in regs.config_writes(cfg)[:-1]:            # all but the enable write
         await write_reg(pins, addr, data)
-    await drive_adc(pins, frames[:64], cfg["slots"], cfg["n_slots"])
+    await drive_adc(pins, frames[:64], cfg["slots"], cfg["n_slots"], filler=filler)
     await ReadOnly()
     assert not int(dut.m_valid.value), "output while disabled"
     await ClockCycles(dut.clk, 2)

@@ -82,14 +82,18 @@ async def configure(pins: Pins, cfg: dict) -> None:
 
 
 async def drive_adc(pins: Pins, frames, slots: list[int], n_slots: int,
-                    slot_cycles: int = SLOT_CYCLES, start_slot: int = 0, seed: int = 0) -> None:
-    """frames: iterable of per-frame sample lists, one value per selected slot."""
+                    slot_cycles: int = SLOT_CYCLES, start_slot: int = 0, seed: int = 0,
+                    filler: str = "random") -> None:
+    """frames: iterable of per-frame sample lists, one value per selected slot.
+    filler: what unselected slots carry: "random" (an ADC mux: other channels' samples) or
+    "zero" (a quiet host: data pins only move for selected slots; T-PWR-3 *_quiet)."""
     rng = random.Random(seed)
     where = {s: i for i, s in enumerate(slots)}
     first = True
     for frame in frames:
         for s in range(start_slot if first else 0, n_slots):
-            v = frame[where[s]] if s in where else rng.randrange(1024)
+            v = (frame[where[s]] if s in where
+                 else rng.randrange(1024) if filler == "random" else 0)
             await pins.strobe(v, frame=int(s == 0))
             await ClockCycles(pins.dut.clk, slot_cycles - 2)
         first = False
@@ -130,12 +134,14 @@ def load_vectors(mode: str) -> tuple[list[list[int]], list[tuple[int, int]], dic
     return frames, expected, cfg
 
 
-async def run_vector_test(dut, mode: str, max_ack_delay: int = 3) -> None:
+async def run_vector_test(dut, mode: str, max_ack_delay: int = 3,
+                          filler: str = "random") -> None:
     frames, expected, cfg = load_vectors(mode)
     pins = await reset(dut)
     await configure(pins, cfg)
     got: list[tuple[int, int]] = []
-    adc = cocotb.start_soon(drive_adc(pins, frames, cfg["slots"], cfg["n_slots"]))
+    adc = cocotb.start_soon(drive_adc(pins, frames, cfg["slots"], cfg["n_slots"],
+                                      filler=filler))
     reader = cocotb.start_soon(read_bytes(pins, len(expected), got, max_ack_delay))
     await adc.join()
     # all input delivered: the encoder gets a few slot times to flush
