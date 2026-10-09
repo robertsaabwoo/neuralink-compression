@@ -35,6 +35,9 @@
   "CTS_ROOT_BUFFER": "sky130_fd_sc_hd__clkbuf_2",
   "CTS_CLK_BUFFERS": ["sky130_fd_sc_hd__clkbuf_4", "sky130_fd_sc_hd__clkbuf_2", "sky130_fd_sc_hd__clkbuf_1"],
 
+  "//": "nlc experiment G (area): synthesis may use drive-strength-1 cells (see synth_excluded.cells)",
+  "SYNTH_EXCLUDED_CELL_FILE": "dir::synth_excluded.cells",
+
   "//": "Configuration docs: https://librelane.readthedocs.io/en/latest/reference/configuration.html",
 
   "//": "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
