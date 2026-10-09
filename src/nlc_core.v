@@ -17,6 +17,7 @@ module nlc_core #(
     input  wire                 s_valid,
     input  wire                 s_frame,
     input  wire [ADC_BITS-1:0]  s_data,
+    output wire                 s_want,     // the next s_valid is a selected slot
     // configuration write port
     input  wire                 cfg_we,
     input  wire [7:0]           cfg_addr,
@@ -53,7 +54,7 @@ module nlc_core #(
 
   nlc_slot_sel #(.ADC_BITS(ADC_BITS), .N_SEL(N_SEL)) u_sel (
       .clk(clk), .rst_n(rst_n), .enable(enable), .n_sel(n_sel), .sel_slots(sel_slots),
-      .s_valid(s_valid), .s_frame(s_frame), .s_data(s_data),
+      .s_valid(s_valid), .s_frame(s_frame), .s_data(s_data), .s_want(s_want),
       .smp_valid(smp_valid), .smp_data(smp_data), .smp_ch(smp_ch),
       .smp_first(smp_first), .smp_last(smp_last), .smp_tick(smp_tick), .smp_short(smp_short)
   );
