@@ -122,7 +122,11 @@ module nlc_rans #(
   assign a_d = {fresh[s_tchan] ? L_INIT : st_mem[s_tchan], in_fc[2*PB:PB], in_fc[PB-1:0],
                 s_tchan, s_traw_v, s_traw};
   assign {a_x, a_f, a_c, a_ch, a_rv, a_raw} = a_q;
-  nlc_greg #(.W(A_W)) u_a (.clk(clk_c), .en(rst_n && adv && fire), .d(a_d), .q(a_q));
+  // The data gates (u_a, u_o, g_st) hang off clk, not clk_c: their enables imply `active`
+  // (clk_c's enable), so it is the same clock, one gate level shallower, the same depth
+  // as the issuer (clk_i) that feeds stage A: CTS without latency balancing then needs
+  // no hold buffers on these paths (area experiment G, docs/results.md).
+  nlc_greg #(.W(A_W)) u_a (.clk(clk), .en(rst_n && adv && fire), .d(a_d), .q(a_q));
 
   // renormalisation: 0, 1 or 2 bytes
   logic [X_W:0]   thr;
@@ -231,14 +235,14 @@ module nlc_rans #(
                   : a_rv ? (8*O_B)'({a_x[15:0], a_raw}) : (8*O_B)'(a_x[15:0]);
   assign o_keep_d = phase == FLUSH ? ((32'(SB) - 32'(f_b) >= 2) ? O_B'(2'b11) : O_B'(2'b01))
                   : O_B'((1 << o_n) - 1);
-  nlc_greg #(.W(8*O_B + O_B)) u_o (.clk(clk_c), .en(o_we), .d({o_data_d, o_keep_d}),
+  nlc_greg #(.W(8*O_B + O_B)) u_o (.clk(clk), .en(o_we), .d({o_data_d, o_keep_d}),
                                     .q({o_data, o_keep}));
 
   // channel state rows: gated, written back by the divider
   genvar gc;
   generate
     for (gc = 0; gc < N_CH; gc++) begin : g_st
-      nlc_greg #(.W(X_W)) u_st (.clk(clk_c), .en(rst_n && adv && w_v && w_ch == CH_W'(gc)),
+      nlc_greg #(.W(X_W)) u_st (.clk(clk), .en(rst_n && adv && w_v && w_ch == CH_W'(gc)),
                                 .d(wb_x), .q(st_mem[gc]));
     end
   endgenerate
