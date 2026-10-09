@@ -30,6 +30,8 @@ def main() -> int:
         f"| power running / idle (uW) | {x.get('layout_power_uw')} / {x.get('layout_power_idle_uw')} |",
         f"| clock power running / idle (uW) | {i.get('layout_clock_power_op_uw')} / "
         f"{i.get('layout_clock_power_idle_uw')} |",
+        f"| by block, running (uW) | {i.get('layout_power_by_block_uw', {}).get('op')} |",
+        f"| by block, idle (uW) | {i.get('layout_power_by_block_uw', {}).get('idle')} |",
         f"| clock buffers (area um^2) | {ct.get('clock_buffers')} ({ct.get('clock_buffer_area_um2')}) |",
         f"| buffer types | {ct.get('buffer_types')} |",
         f"| latency delay buffers | {ct.get('latency_delay_buffers')} |",

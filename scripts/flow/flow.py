@@ -168,13 +168,24 @@ def step_lint(r: Run) -> None:
     r.info["lint_warnings_top"] = len(re.findall(r"^%Warning-", t2, re.M))
 
 
+def _build_dir(r: Run, cwd: Path, tag: str) -> Path:
+    """A build folder of its own for every run and suite (passed as SIM_BUILD= on the make
+    line, which overrides the Makefiles): runs that share the working tree, e.g. two
+    check.py runs at once, no longer delete each other's simulator builds."""
+    d = cwd / "sim_build" / f"run-{r.out.name}-{tag}"
+    shutil.rmtree(d, ignore_errors=True)
+    return d
+
+
 def _cocotb(r: Run, cwd: Path, log: str, make_args: str = "") -> list[tuple[str, bool]]:
-    shutil.rmtree(cwd / "sim_build", ignore_errors=True)
-    (cwd / "results.xml").unlink(missing_ok=True)
-    r.sh(f"make {make_args}", log, cwd=cwd)
-    res = junit(cwd / "results.xml")
+    bdir = _build_dir(r, cwd, Path(log).stem)
+    xml = bdir / "results.xml"
+    r.sh(f"make {make_args} SIM_BUILD={bdir.as_posix()} COCOTB_RESULTS_FILE={xml.as_posix()}",
+         log, cwd=cwd)
+    res = junit(xml)
     if not res:
         r.failed_tests.append(f"{log}: no results (build error?)")
+    shutil.rmtree(bdir, ignore_errors=True)
     return res
 
 
@@ -204,13 +215,15 @@ def cocotb_jobs(r: Run, cwd: Path, tag: str, build: str,
                 jobs: list[tuple[str, str, str]]) -> dict[str, list[tuple[str, bool]]]:
     """Build <cwd> once with make args `build`, then run jobs (name, filter regex, extra
     make args) in parallel. Logs: <tag>_build.log and <tag>/<name>.log in the report."""
-    shutil.rmtree(cwd / "sim_build", ignore_errors=True)
+    bdir = _build_dir(r, cwd, tag)
+    build = f"{build} SIM_BUILD={bdir.as_posix()}"
     logs = r.out / tag
     logs.mkdir(exist_ok=True)
-    tmp = cwd / "sim_build" / "results"
+    tmp = bdir / "results"
     code, _ = r.sh(f"make {build} COCOTB_TEST_FILTER=__build_only__ "
-                   f"COCOTB_RESULTS_FILE={cwd / 'sim_build' / 'build.xml'}", f"{tag}_build.log", cwd=cwd)
-    vvps = [p.relative_to(cwd) for p in (cwd / "sim_build").rglob("sim.vvp")]
+                   f"COCOTB_RESULTS_FILE={(bdir / 'build.xml').as_posix()}", f"{tag}_build.log",
+                   cwd=cwd)
+    vvps = [p.relative_to(cwd) for p in bdir.rglob("sim.vvp")]
     if not vvps:
         r.failed_tests.append(f"{tag}: build failed (see {tag}_build.log)")
         return {}
@@ -241,6 +254,7 @@ def cocotb_jobs(r: Run, cwd: Path, tag: str, build: str,
             if not res:
                 r.failed_tests.append(f"{tag} {name}: no results (see {tag}/)")
     dur_file.write_text(json.dumps(durations, indent=1, sort_keys=True))
+    shutil.rmtree(bdir, ignore_errors=True)
     return out
 
 
@@ -497,7 +511,6 @@ def step_gl(r: Run) -> None:
     def gl_top():
         if not top_net.exists():
             return None
-        shutil.rmtree(ROOT / "test/sim_build/gl_local", ignore_errors=True)
         return _cocotb(r, ROOT / "test", "gl_top.log",
                        f"GATES=local NETLIST={top_net} CLK_NS={OP['clock_period_ns']} "
                        "COCOTB_TEST_FILTER='test_lossy$'")
@@ -977,6 +990,24 @@ def step_layout(r: Run, quick: bool = False) -> None:
         root_rows.append(row)
     root_rows.sort(key=lambda x: -(x.get("op_uw") or 0))
     r.info["layout_clock_roots_top"] = root_rows[:5]
+
+    # --- core vs TT pin interface: the core is what an implant would carry; the pin glue
+    # (input registers of project.v) exists only for TT. The free-running clock root is
+    # shared and reported on its own. Attribution by named nets (the netlist is flat).
+    blocks = NL.cell_blocks(nl, roots, NL.core_inputs(ROOT / "src" / "nlc_core.v"))
+    by_block: dict[str, dict[str, float]] = {}
+    for name in names:
+        ip = inst_power.get(f"layout_{name}", {})
+        if ip:
+            agg: dict[str, float] = {}
+            for inst, pw in ip.items():
+                k = blocks.get(inst, "other")
+                agg[k] = agg.get(k, 0.0) + pw
+            by_block[name] = {k: round(v, 3) for k, v in sorted(agg.items())}
+    r.info["layout_power_by_block_uw"] = by_block
+    for name, metric in [("op", "layout_core_power_uw"), ("idle", "layout_core_power_idle_uw")]:
+        if name in by_block:
+            r.metrics[metric] = by_block[name].get("core", 0.0)
     rcols = ["root", "enable", "flops", "child_gates", "buffers", "depth", "delay_buffers",
              "dummy_loads", "buffer_area_um2", "buffer_types"] + [f"{n}_uw" for n in names]
     md += ["## Clock roots (port and every clock gate), by running power", "",

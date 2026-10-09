@@ -235,7 +235,7 @@ def clock_roots(nl: Netlist, lib: Lib, clock: str = "clk") -> list[dict]:
         for g in gates if "GCLK" in g.outs]
     out = []
     for net, driver, enable in roots:
-        bufs, depth, flops, child, dummies = [], 0, 0, 0, 0
+        bufs, depth, flops, child, dummies = [], 0, [], 0, 0
         stack = [(net, 0)]
         while stack:
             n, d = stack.pop()
@@ -249,12 +249,13 @@ def clock_roots(nl: Netlist, lib: Lib, clock: str = "clk") -> list[dict]:
                     bufs.append(c.inst)
                     stack += [(o, d + 1) for o in c.outs.values()]
                 elif k == "flop":
-                    flops += 1
+                    flops.append(c.inst)
                 elif k == "clock_gate":
                     child += 1
                 elif k == "clock_dummy_load":
                     dummies += 1
-        out.append({"root": net, "driver": driver, "enable": enable, "flops": flops,
+        out.append({"root": net, "driver": driver, "enable": enable, "flops": len(flops),
+                    "flop_insts": flops,
                     "child_gates": child, "buffers": bufs, "depth": depth,
                     "delay_buffers": sum(b.startswith("delaybuf") for b in bufs),
                     "dummy_loads": dummies,
@@ -288,6 +289,68 @@ def clock_tree_summary(nl: Netlist, lib: Lib, roots: list[dict] | None = None) -
             "flops_per_gate_median": per_gate[len(per_gate) // 2] if per_gate else None,
             "flop_clock_pins": sum(r["flops"] for r in roots),
             "clock_nets": len(nl.clock_nets)}
+
+
+def core_inputs(core_v: Path) -> set[str]:
+    """Input port names of nlc_core: nets named core.<port> belong to whoever drives them
+    (the TT pin glue in project.v), not to the core."""
+    text = core_v.read_text()
+    return set(re.findall(r"^\s*input\s+wire\s+(?:\[[^\]]+\]\s*)?(\w+)", text, re.M))
+
+
+def _named_down(nl: Netlist, c: Cell, depth: int = 6) -> str | None:
+    """First RTL-named net in the fanout cone of a cell (anonymous nets are skipped)."""
+    seen, frontier = set(), list(c.outs.values())
+    for _ in range(depth):
+        nxt = []
+        for n in frontier:
+            if n not in nl.clock_nets and not re.fullmatch(r"_\d+_|net\d+|\S*fanout\S*", n):
+                return n
+            for i, _p in nl.sinks.get(n, ()):
+                cc = nl.cells.get(i)
+                for o in (cc.outs.values() if cc is not None else ()):
+                    if o not in seen:
+                        seen.add(o)
+                        nxt.append(o)
+        frontier = nxt
+    return None
+
+
+def cell_blocks(nl: Netlist, roots: list[dict], core_ports: set[str],
+                clock: str = "clk") -> dict[str, str]:
+    """Instance -> "core", "pins" (TT pin interface: everything outside nlc_core, and nets
+    named after nlc_core's input ports) or "clock_trunk" (the free-running clock root, shared).
+    Logic belongs to the block of the first named net it drives (else the one it reads); a
+    gated clock subtree (buffers and its gate) to the block of most of its flops."""
+    def label(net: str | None) -> str:
+        if not net:
+            return "core"
+        name = net.split(" <- ")[-1].split(", ")[0]
+        parts = name.split(".")
+        if parts[0] != "core":
+            return "pins"
+        return "pins" if re.sub(r"\[\d+\]$", "", parts[1]) in core_ports else "core"
+
+    out: dict[str, str] = {}
+    for c in nl.cells.values():
+        if cell_class(nl, c).startswith("clock"):
+            continue
+        net = _named_down(nl, c) or (named_source(nl, next(iter(c.outs.values())))
+                                     if c.outs else None)
+        out[c.inst] = label(net)
+    for rt in roots:
+        if rt["root"] == clock:
+            blk = "clock_trunk"
+        else:
+            votes: dict[str, int] = defaultdict(int)
+            for f in rt.get("flop_insts", []):
+                votes[out.get(f, "core")] += 1
+            blk = max(votes, key=votes.get) if votes else "core"
+        for b in rt["buffers"] + ([rt["driver"]] if rt["driver"] in nl.cells else []):
+            out[b] = blk
+    for c in nl.cells.values():               # dummy loads etc.: the trunk unless claimed
+        out.setdefault(c.inst, "clock_trunk")
+    return out
 
 
 def _count(it) -> dict[str, int]:
