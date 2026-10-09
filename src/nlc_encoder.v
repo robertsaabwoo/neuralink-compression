@@ -57,13 +57,15 @@ module nlc_encoder #(
     output wire                 wr_last,
     output wire                 wr_abort,   // write the abort token (D6/D7)
     input  wire                 fifo_full,
-    input  wire [FIFO_AW:0]     fifo_count
+    input  wire [FIFO_AW:0]     fifo_count,
+    output wire                 busy        // needs clock edges while enable = 0
 );
 
   wire       ly_valid, ly_last, ly_overflow, ly_abort;
   wire [7:0] ly_data;
   reg        tok, in_pkt, en_q;              // token owed, host holds part of a packet
   wire       tok_wr = tok && !fifo_full;
+  assign busy = en_q || tok;                 // the edge after enable falls, the token
 
   nlc_lossy #(.N_SEL(N_SEL), .SEL_W(SEL_W)) u_lossy (
       .clk(clk), .rst_n(rst_n), .enable(enable), .n_sel(n_sel),

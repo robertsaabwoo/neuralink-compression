@@ -27,7 +27,8 @@ module nlc_encoder #(
     output wire                 wr_last,
     output wire                 wr_abort,
     input  wire                 fifo_full,
-    input  wire [FIFO_AW:0]     fifo_count
+    input  wire [FIFO_AW:0]     fifo_count,
+    output wire                 busy
 );
 
   localparam MAXB = 8192;
@@ -54,5 +55,7 @@ module nlc_encoder #(
   assign wr_data = cur[7:0];
   assign wr_last = cur[8];
   assign wr_abort = 1'b0;
+
+  assign busy = 1'b1;                        // replay: keep the core clocked
 
 endmodule

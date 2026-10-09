@@ -35,11 +35,20 @@ module nlc_core #(
   localparam FIFO_AW = $clog2(FIFO_DEPTH);
 
   wire                enable;
+  wire                enc_busy;
+
+  // One gate in front of the whole core: disabled (enable = 0) with the output drained,
+  // no child gate sees a clock edge either (idle power, docs/results.md F20). Control
+  // state clears asynchronously on disable; edges are needed only for a config write,
+  // the FIFO draining (m_valid) and the encoder's disable edge / abort token (busy).
+  wire clk_core;
+  nlc_icg u_cg_core (.clk(clk), .en(!rst_n || enable || cfg_we || m_valid || enc_busy),
+                     .gclk(clk_core));
   wire [SEL_W:0]      n_sel;
   wire [8*N_SEL-1:0]  sel_slots;
 
   nlc_cfg #(.N_SEL(N_SEL)) u_cfg (
-      .clk(clk), .rst_n(rst_n),
+      .clk(clk_core), .rst_n(rst_n),
       .cfg_we(cfg_we), .cfg_addr(cfg_addr), .cfg_data(cfg_data),
       .enable(enable), .n_sel(n_sel), .sel_slots(sel_slots)
   );
@@ -53,7 +62,7 @@ module nlc_core #(
   wire                smp_short;
 
   nlc_slot_sel #(.ADC_BITS(ADC_BITS), .N_SEL(N_SEL)) u_sel (
-      .clk(clk), .rst_n(rst_n), .enable(enable), .n_sel(n_sel), .sel_slots(sel_slots),
+      .clk(clk_core), .rst_n(rst_n), .enable(enable), .n_sel(n_sel), .sel_slots(sel_slots),
       .s_valid(s_valid), .s_frame(s_frame), .s_data(s_data), .s_want(s_want),
       .smp_valid(smp_valid), .smp_data(smp_data), .smp_ch(smp_ch),
       .smp_first(smp_first), .smp_last(smp_last), .smp_tick(smp_tick), .smp_short(smp_short)
@@ -67,16 +76,16 @@ module nlc_core #(
   wire [FIFO_AW:0]    fifo_count;
 
   nlc_encoder #(.ADC_BITS(ADC_BITS), .N_SEL(N_SEL), .FIFO_AW(FIFO_AW)) u_enc (
-      .clk(clk), .rst_n(rst_n),
+      .clk(clk_core), .rst_n(rst_n),
       .enable(enable), .n_sel(n_sel),
       .smp_valid(smp_valid), .smp_data(smp_data), .smp_ch(smp_ch),
       .smp_first(smp_first), .smp_last(smp_last), .smp_tick(smp_tick), .smp_short(smp_short),
       .wr_en(wr_en), .wr_data(wr_data), .wr_last(wr_last), .wr_abort(wr_abort),
-      .fifo_full(fifo_full), .fifo_count(fifo_count)
+      .fifo_full(fifo_full), .fifo_count(fifo_count), .busy(enc_busy)
   );
 
   nlc_out_fifo #(.DEPTH(FIFO_DEPTH)) u_fifo (
-      .clk(clk), .rst_n(rst_n),
+      .clk(clk_core), .rst_n(rst_n),
       .wr_en(wr_en), .wr_data(wr_data), .wr_last(wr_last), .wr_abort(wr_abort),
       .full(fifo_full), .count(fifo_count),
       .m_valid(m_valid), .m_data(m_data), .m_last(m_last), .m_abort(m_abort), .m_ready(m_ready),
