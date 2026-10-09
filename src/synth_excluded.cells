@@ -1,0 +1,29 @@
+# nlc area experiment G (docs/results.md): cells Yosys/ABC must not map to.
+# The sky130 PDK default in LibreLane 3.0.14 (open_pdks 8afc834, openlane/sky130_fd_sc_hd/
+# no_synth.cells) also excludes every drive-strength-1 cell (dfxtp_1, nand2_1, inv_1, ...), so
+# synthesis maps to _2 and up: +14k um^2 on this design. This list is the newer open_pdks one
+# (librelane/sky130_fd_sc_hd/synth_excluded.cells), which keeps _1 cells; the resizer still
+# upsizes where slew/cap/timing need it. PnR exclusions (PNR_EXCLUDED_CELL_FILE) are unchanged.
+# clock buffers/inverters (used in CTS)
+sky130_fd_sc_hd__clkbuf*
+sky130_fd_sc_hd__clkinv*
+sky130_fd_sc_hd__clkinvlp*
+# clock delay buffers (used in PNR timing)
+sky130_fd_sc_hd__clkdlybuf*
+# signal delay buffers (used in PNR timing)
+sky130_fd_sc_hd__dlygate*
+sky130_fd_sc_hd__dlymetal*
+# tap/decap/fill (PNR)
+sky130_fd_sc_hd__tap*
+sky130_fd_sc_hd__decap*
+sky130_fd_sc_hd__fill*
+# diode
+sky130_fd_sc_hd__diode*
+# low power flow (power domain isolation)
+sky130_fd_sc_hd__lpflow_*
+# ECO generic spare cell
+sky130_fd_sc_hd__macro_sparecell
+# probe
+sky130_fd_sc_hd__probe*
+# scan chain cells (used for DFT)
+sky130_fd_sc_hd__s*
