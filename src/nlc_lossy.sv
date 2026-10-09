@@ -5,23 +5,22 @@
 // against LossyCodec in model/nlc/lossy.py (docstring = format) with the
 // tables in model/nlc/lossy_tables.json (= nlc_lossy_rom.svh).
 //
-//   smp ─► 3 x nlc_lift53 ─► quantise / a3 delta ─► per-channel burst buffer
-//            (state RAM)                              │ drained eagerly, frame / channel order
-//                                                     ▼
-//                        bytes ◄─ serialiser + header ◄─ nlc_rans (II=1)
+//   smp ─► per-channel sample ─► issuer: 1 x nlc_lift53, one level per clock ─► quantise /
+//          register (state RAM)     a3 delta ─► nlc_rans (II=1) ─► serialiser + header ─► bytes
 //
 // Samples arrive at most one per clock (the clock can be the ADC slot rate),
 // frame-major, never stalled. Every channel is at the same block position, so
 // the schedule (which levels fire, how many symbols are pushed and popped) is
 // global; only data lives per channel.
 //
-// Burst buffer: a sample pushes 0, 1, 2 or 4 symbols (d1, d2, d3, delta a3) into
-// fixed slots 0..3 of its channel's buffer (the slot gives the context). The
-// issuer drains every burst as soon as it is there, frame by frame, channel by
-// channel (nlc.lossy.coding_order): at most 4 x N_SEL symbols per frame against
-// a frame of clocks, so a burst is coded long before the channel's next sample.
-// The coder may lag by up to a frame (packet flush, output back-pressure); more
-// than a frame sets `overflow` (the channel's next burst would overwrite it).
+// Bursts: a sample yields 0, 1, 2 or 4 symbols (d1, d2, d3, delta a3; the position
+// gives the context). The issuer takes them as soon as the sample is there, frame by
+// frame, channel by channel (nlc.lossy.coding_order), and lifts the sample one level
+// per issued symbol (shared lifter), so only the sample is buffered per channel: at
+// most 4 x N_SEL symbols per frame against a frame of clocks, so a burst is coded long
+// before the channel's next sample. The coder may lag by up to a frame (packet flush,
+// output back-pressure); more than a frame sets `overflow` (the channel's next sample
+// would overwrite the one not yet lifted).
 //
 // Requirements: frames are long enough to absorb the packet flush (about
 // coder depth + 3 * N_SEL * SB / 2 cycles; depth 2, or up to Q_W + 3 with DIV_REG), e.g. a 256-slot mux at one slot per clock.
@@ -62,12 +61,11 @@ module nlc_lossy #(
 );
   // fixed by LossyConfig: adc_bits 10, block 64, levels 3, shifts a 1 / d (3, 2, 2),
   // s_max 31, esc_bytes 2, prob_bits 12, lsh 2
-  localparam int QW     = 13;            // FIFO entry: widest value (a3 delta)
-  localparam int QDEPTH = 4;              // burst buffer slots per channel
-  // Slot widths: safe interval bounds of the lifting on 10-bit samples (|d1| <= 1023,
-  // |d2| <= 2046, |d3| <= 4092, |a3| <= 4092): |q1| <= 127, |q2| <= 511, |q3| <= 1023,
-  // |delta a3| <= 4092. Stored narrow, sign-extended on read.
-  localparam int W0 = 8, W1 = 10, W2 = 11, W3 = QW;
+  localparam int QW     = 13;            // issued value: widest (a3 delta)
+  localparam int QDEPTH = 4;              // symbols per burst (d1, d2, d3, delta a3)
+  localparam int LEVELS = 3;              // wavelet levels, one shared lifter (u_lift)
+  // Value bounds of the lifting on 10-bit samples (|d1| <= 1023, |d2| <= 2046,
+  // |d3| <= 4092, |a3| <= 4092): the state registers are as narrow as these allow.
   localparam int S_MAX  = 31;
   localparam int ESC    = 2 * S_MAX + 1;
 
@@ -90,10 +88,10 @@ module nlc_lossy #(
 
   // ---------------------------------------------------------------------------
   // Per-channel state (no reset: every register is written before it is read).
-  // Clock-gated registers (nlc_greg): a channel's fields and FIFO slots only see
-  // a clock edge when they are written, i.e. on its own slot. Packed arrays,
-  // one element per channel / FIFO entry, driven by the nlc_greg instances.
+  // Clock-gated registers (nlc_greg): a channel's fields only see a clock edge
+  // when they are written. Packed arrays, one element per channel.
   // ---------------------------------------------------------------------------
+  logic [N_SEL-1:0][9:0]  sx;                      // the sample, until the issuer lifts it
   logic [N_SEL-1:0][9:0]  e1, o1;
   logic [N_SEL-1:0][10:0] dp1;
   logic [N_SEL-1:0][10:0] e2, o2;
@@ -101,38 +99,125 @@ module nlc_lossy #(
   logic [N_SEL-1:0][11:0] e3, o3;
   logic [N_SEL-1:0][12:0] dp3;
   logic [N_SEL-1:0][11:0] qa_prev;
-  logic [N_SEL-1:0][W0-1:0] bq0;                   // burst buffers: slot 0..3 per channel
-  logic [N_SEL-1:0][W1-1:0] bq1;
-  logic [N_SEL-1:0][W2-1:0] bq2;
-  logic [N_SEL-1:0][W3-1:0] bq3;
 
-  // ---------------------------------------------------------------------------
-  // Lifting: level 1 on the centred sample, level l+1 on level l's a
-  // ---------------------------------------------------------------------------
   logic signed [9:0] x0;
   assign x0 = {~smp_data[9], smp_data[8:0]};       // x - 512
 
-  logic              pv1, pv2, pv3;
-  logic [4:0]        p1;
-  logic [3:0]        p2;
-  logic [2:0]        p3;
-  logic signed [10:0] a1, d1;
-  logic signed [11:0] a2, d2;
-  logic signed [12:0] a3, d3;
-  logic e1_we, o1_we, dp1_we, e2_we, o2_we, dp2_we, e3_we, o3_we, dp3_we;
+  // Symbols a sample at block position f pushes: d1 | d1 d2 | d1 d2 d3 a3 (a
+  // prefix). The pair-complete rule of each level; nlc.lossy.push_schedule.
+  function automatic [2:0] burst_len(input [5:0] pos);
+    logic [4:0] i1;
+    logic [3:0] i2;
+    logic       c1, c2, c3;
+    begin
+      c1 = pos[0] ? &pos : pos != '0;
+      i1 = pos[0] ? pos[5:1] : pos[5:1] - 1'b1;
+      c2 = c1 && (i1[0] ? &i1 : i1 != '0);
+      i2 = i1[0] ? i1[4:1] : i1[4:1] - 1'b1;
+      c3 = c2 && (i2[0] ? &i2 : i2 != '0);
+      burst_len = c3 ? 3'd4 : c2 ? 3'd2 : c1 ? 3'd1 : 3'd0;
+    end
+  endfunction
 
-  nlc_lift53 #(.W(10), .N_W(6)) u_l1 (
-      .v(smp_valid), .idx(n_eff), .x(x0),
-      .e(e1[smp_ch]), .o(o1[smp_ch]), .dp(dp1[smp_ch]),
-      .pv(pv1), .p(p1), .a(a1), .d(d1), .e_we(e1_we), .o_we(o1_we), .dp_we(dp1_we));
-  nlc_lift53 #(.W(11), .N_W(5)) u_l2 (
-      .v(pv1), .idx(p1), .x(a1),
-      .e(e2[smp_ch]), .o(o2[smp_ch]), .dp(dp2[smp_ch]),
-      .pv(pv2), .p(p2), .a(a2), .d(d2), .e_we(e2_we), .o_we(o2_we), .dp_we(dp2_we));
-  nlc_lift53 #(.W(12), .N_W(4)) u_l3 (
-      .v(pv2), .idx(p2), .x(a2),
-      .e(e3[smp_ch]), .o(o3[smp_ch]), .dp(dp3[smp_ch]),
-      .pv(pv3), .p(p3), .a(a3), .d(d3), .e_we(e3_we), .o_we(o3_we), .dp_we(dp3_we));
+  logic [2:0] pushes;                    // this sample's burst size (test/env monitor)
+  assign pushes = smp_valid ? burst_len(n_eff) : 3'd0;
+
+  // ---------------------------------------------------------------------------
+  // Parent clock gates: a block's registers (and its child gates) only see a
+  // clock edge when the block has work. Control registers clear asynchronously
+  // on clr_n, so a disabled core (enable = 0) sees no clock edge at all (C-PWR-2).
+  // ---------------------------------------------------------------------------
+  logic clk_l, clk_s, clk_i;              // lossy core, sample (8 of 256 clocks), issuer
+  logic r_fire, c_active;
+  // grandparent: the block gates below only see the clock while something is happening
+  logic iss_busy;
+  assign iss_busy = pending != '0;
+  nlc_icg u_cg_l (.clk(clk), .en(smp_valid || smp_tick || iss_busy || c_active || abort_now ||
+                                 (m_valid && m_ready)), .gclk(clk_l));
+  nlc_icg u_cg_s (.clk(clk_l), .en(smp_valid || smp_tick), .gclk(clk_s));
+  nlc_icg u_cg_i (.clk(clk_l), .en(smp_valid || iss_busy || abort_now), .gclk(clk_i));
+
+  // ---------------------------------------------------------------------------
+  // Issuer + wavelet: the sample of channel rr in frame j is lifted one level per
+  // clock, in the clock its symbol is issued (one shared nlc_lift53):
+  //   kk = 0: level 1 on the stored sample -> d1 issued, a1 -> xr
+  //   kk = 1: level 2 on a1               -> d2 issued, a2 -> xr
+  //   kk = 2: level 3 on a2               -> d3 issued, delta a3 -> xr
+  //   kk = 3: delta a3 issued from xr
+  // A level whose pair is not complete only stores its input (no lift): level 1 in
+  // the empty-burst frames (one clock per channel, nothing issued), level 2 / 3 in
+  // the clock that computed that input (a1 / a2 straight from the lifter). The issue
+  // order and cycle timing are those of the former burst buffer (bursts written at
+  // the sample, read from the next clock on); the only per-channel buffer left is the
+  // sample, which the issuer reads before that channel's next sample (pending <= n_sel,
+  // else abort; blocks restart at every packet, so an abort leaves no stale state read).
+  // ---------------------------------------------------------------------------
+  logic [QW-1:0] hv, hmag;
+  logic [1:0]    hctx;
+  logic          is_esc;
+  logic [5:0]    hsym;
+  logic [15:0]   hraw;
+  logic          r_valid, r_ready, r_last;
+  logic [2:0]    nb;                     // burst size of frame j (all channels)
+  logic          b_end, unit_done;       // last symbol of the burst / channel sample done
+  assign b_end  = 3'(kk) + 1'b1 == nb;
+
+  // pair schedule of frame j (global): pair complete at each level, input / pair indices
+  logic [5:0] f;
+  logic [4:0] f1;
+  logic [3:0] f2;
+  logic [2:0] f3;
+  logic       pv1, pv2, pv3;
+  assign f   = j[5:0];
+  assign pv1 = f[0] ? &f : f != '0;
+  assign f1  = f[0] ? f[5:1] : f[5:1] - 1'b1;
+  assign pv2 = pv1 && (f1[0] ? &f1 : f1 != '0);
+  assign f2  = f1[0] ? f1[4:1] : f1[4:1] - 1'b1;
+  assign pv3 = pv2 && (f2[0] ? &f2 : f2 != '0);
+  assign f3  = f2[0] ? f2[3:1] : f2[3:1] - 1'b1;
+  assign nb  = pv3 ? 3'd4 : pv2 ? 3'd2 : pv1 ? 3'd1 : 3'd0;
+
+  // channel rr's state, then the level's operands (sign-extended to the lifter's 12 bits)
+  logic [9:0]  s_r, e1_r, o1_r;
+  logic [10:0] dp1_r, e2_r, o2_r;
+  logic [11:0] dp2_r, e3_r, o3_r, qa_p;
+  logic [12:0] dp3_r;
+  assign s_r   = sx[rr];
+  assign e1_r  = e1[rr];
+  assign o1_r  = o1[rr];
+  assign dp1_r = dp1[rr];
+  assign e2_r  = e2[rr];
+  assign o2_r  = o2[rr];
+  assign dp2_r = dp2[rr];
+  assign e3_r  = e3[rr];
+  assign o3_r  = o3[rr];
+  assign dp3_r = dp3[rr];
+  assign qa_p  = qa_prev[rr];
+
+  logic [12:0] xr;                       // a1 / a2 between levels, then delta a3
+  logic [11:0] lx, le, lo;
+  logic [12:0] ldp;
+  logic        lodd, lfirst;
+  always_comb begin
+    case (kk)
+      2'd0: begin
+        lx = {{2{s_r[9]}}, s_r};     le = {{2{e1_r[9]}}, e1_r};   lo = {{2{o1_r[9]}}, o1_r};
+        ldp = {{2{dp1_r[10]}}, dp1_r}; lodd = f[0];  lfirst = f1 == '0;
+      end
+      2'd1: begin
+        lx = xr[11:0];               le = {e2_r[10], e2_r};       lo = {o2_r[10], o2_r};
+        ldp = {dp2_r[11], dp2_r};    lodd = f1[0]; lfirst = f2 == '0;
+      end
+      default: begin
+        lx = xr[11:0];               le = e3_r;                   lo = o3_r;
+        ldp = dp3_r;                 lodd = f2[0]; lfirst = f3 == '0;
+      end
+    endcase
+  end
+
+  logic [12:0] la, ld;
+  nlc_lift53 #(.W(12)) u_lift (
+      .odd(lodd), .first(lfirst), .x(lx), .e(le), .o(lo), .dp(ldp), .a(la), .d(ld));
 
   // sign(c) * (|c| >> sh). Two's complement handled through the MSB, no signed
   // casts or comparisons: Yosys and Icarus disagreed on those (see nlc_lift53).
@@ -146,107 +231,62 @@ module nlc_lossy #(
   endfunction
 
   logic [QW-1:0] q1, q2, q3, qa3, da3;
-  assign q1  = quant({{2{d1[10]}}, d1}, 3);
-  assign q2  = quant({d2[11], d2}, 2);
-  assign q3  = quant(d3, 2);
-  assign qa3 = quant(a3, 1);
-  logic [11:0] qa_p;                     // this channel's previous quantised a3
-  assign qa_p = qa_prev[smp_ch];
-  assign da3 = qa3 - ((p3 == '0) ? '0 : {qa_p[11], qa_p});
+  assign q1  = quant(ld, 3);             // ld = d1 / d2 / d3 at kk = 0 / 1 / 2
+  assign q2  = quant(ld, 2);
+  assign q3  = quant(ld, 2);
+  assign qa3 = quant(la, 1);             // la = a3 at kk = 2
+  assign da3 = qa3 - ((f3 == '0) ? '0 : {qa_p[11], qa_p});
 
-  // Symbols a sample at block position f pushes: d1 | d1 d2 | d1 d2 d3 a3 (a
-  // prefix). The pair-complete rule of nlc_lift53 on each level; nlc.lossy.push_schedule.
-  function automatic [2:0] burst_len(input [5:0] f);
-    logic [4:0] f1;
-    logic [3:0] f2;
-    logic       v1, v2, v3;
-    begin
-      v1 = f[0] ? &f : f != '0;
-      f1 = f[0] ? f[5:1] : f[5:1] - 1'b1;
-      v2 = v1 && (f1[0] ? &f1 : f1 != '0);
-      f2 = f1[0] ? f1[4:1] : f1[4:1] - 1'b1;
-      v3 = v2 && (f2[0] ? &f2 : f2 != '0);
-      burst_len = v3 ? 3'd4 : v2 ? 3'd2 : v1 ? 3'd1 : 3'd0;
-    end
-  endfunction
+  always_comb begin
+    case (kk)
+      2'd0:    hv = q1;
+      2'd1:    hv = q2;
+      2'd2:    hv = q3;
+      default: hv = xr;
+    endcase
+  end
 
-  logic [2:0] pushes;                    // this sample's burst size (test/env monitor)
-  assign pushes = {pv3, pv2 & ~pv3, pv1 & ~pv2};
+  // one issuer step done this clock (a symbol taken, or an empty-burst channel walked)
+  logic st, st0, st1, st2;
+  assign st  = iss_busy && (nb == '0 || r_fire);
+  assign st0 = st && kk == 2'd0;
+  assign st1 = st && kk == 2'd1;
+  assign st2 = st && kk == 2'd2;
+  logic l2_in, l3_in;                    // level 2 / 3 stores its input this clock
+  assign l2_in = (st0 && nb == 3'd1) || st1;
+  assign l3_in = (st1 && nb == 3'd2) || st2;
+  logic [10:0] e2_d;
+  logic [11:0] e3_d;
+  assign e2_d = kk == 2'd0 ? la[10:0] : lx[10:0];  // a1 from the lifter / from xr
+  assign e3_d = kk == 2'd1 ? la[11:0] : lx[11:0];  // a2 from the lifter / from xr
 
-  // ---------------------------------------------------------------------------
-  // Per-channel state writes: one clock gate per (channel, field) and per
-  // (channel, burst slot). Slot k holds the k-th push: d1, d2, d3, delta a3.
-  // ---------------------------------------------------------------------------
-
-  // Parent clock gates: a block's registers (and its child gates) only see a
-  // clock edge when the block has work. Control registers clear asynchronously
-  // on clr_n, so a disabled core (enable = 0) sees no clock edge at all (C-PWR-2).
-  logic clk_l, clk_s, clk_i;              // lossy core, sample (8 of 256 clocks), issuer
-  logic r_fire, c_active;
-  // grandparent: the block gates below only see the clock while something is happening
-  logic iss_busy;
-  assign iss_busy = pending != '0;
-  nlc_icg u_cg_l (.clk(clk), .en(smp_valid || smp_tick || iss_busy || c_active || abort_now ||
-                                 (m_valid && m_ready)), .gclk(clk_l));
-  nlc_icg u_cg_s (.clk(clk_l), .en(smp_valid || smp_tick), .gclk(clk_s));
-  nlc_icg u_cg_i (.clk(clk_l), .en(smp_valid || iss_busy || abort_now), .gclk(clk_i));
+  nlc_greg #(.W(13)) u_x (.clk(clk_i), .en((st0 && pv2) || (st1 && pv3) || st2),
+                          .d(st2 ? da3 : la), .q(xr));
 
   genvar gc;
   generate
     for (gc = 0; gc < N_SEL; gc++) begin : g_ch
-      logic wr;                          // this channel's sample, outside clear
+      logic wr, iw;                      // this channel's sample (outside clear) / issue step
       assign wr = clr_n && run && smp_valid && smp_ch == SEL_W'(gc);
-      nlc_greg #(.W(10)) u_e1  (.clk(clk_s), .en(wr && e1_we),  .d(x0),        .q(e1[gc]));
-      nlc_greg #(.W(10)) u_o1  (.clk(clk_s), .en(wr && o1_we),  .d(x0),        .q(o1[gc]));
-      nlc_greg #(.W(11)) u_dp1 (.clk(clk_s), .en(wr && dp1_we), .d(d1),        .q(dp1[gc]));
-      nlc_greg #(.W(11)) u_e2  (.clk(clk_s), .en(wr && e2_we),  .d(a1),        .q(e2[gc]));
-      nlc_greg #(.W(11)) u_o2  (.clk(clk_s), .en(wr && o2_we),  .d(a1),        .q(o2[gc]));
-      nlc_greg #(.W(12)) u_dp2 (.clk(clk_s), .en(wr && dp2_we), .d(d2),        .q(dp2[gc]));
-      nlc_greg #(.W(12)) u_e3  (.clk(clk_s), .en(wr && e3_we),  .d(a2),        .q(e3[gc]));
-      nlc_greg #(.W(12)) u_o3  (.clk(clk_s), .en(wr && o3_we),  .d(a2),        .q(o3[gc]));
-      nlc_greg #(.W(13)) u_dp3 (.clk(clk_s), .en(wr && dp3_we), .d(d3),        .q(dp3[gc]));
-      nlc_greg #(.W(12)) u_qa  (.clk(clk_s), .en(wr && pv3),    .d(qa3[11:0]), .q(qa_prev[gc]));
-      nlc_greg #(.W(W0)) u_b0 (.clk(clk_s), .en(wr && pv1), .d(q1[W0-1:0]),  .q(bq0[gc]));
-      nlc_greg #(.W(W1)) u_b1 (.clk(clk_s), .en(wr && pv2), .d(q2[W1-1:0]),  .q(bq1[gc]));
-      nlc_greg #(.W(W2)) u_b2 (.clk(clk_s), .en(wr && pv3), .d(q3[W2-1:0]),  .q(bq2[gc]));
-      nlc_greg #(.W(W3)) u_b3 (.clk(clk_s), .en(wr && pv3), .d(da3[W3-1:0]), .q(bq3[gc]));
+      assign iw = rr == SEL_W'(gc);
+      nlc_greg #(.W(10)) u_sx  (.clk(clk_s), .en(wr),                    .d(x0),        .q(sx[gc]));
+      nlc_greg #(.W(10)) u_e1  (.clk(clk_i), .en(iw && st0 && !f[0]),    .d(lx[9:0]),   .q(e1[gc]));
+      nlc_greg #(.W(10)) u_o1  (.clk(clk_i), .en(iw && st0 && f[0]),     .d(lx[9:0]),   .q(o1[gc]));
+      nlc_greg #(.W(11)) u_dp1 (.clk(clk_i), .en(iw && st0 && pv1),      .d(ld[10:0]),  .q(dp1[gc]));
+      nlc_greg #(.W(11)) u_e2  (.clk(clk_i), .en(iw && l2_in && !f1[0]), .d(e2_d),      .q(e2[gc]));
+      nlc_greg #(.W(11)) u_o2  (.clk(clk_i), .en(iw && l2_in && f1[0]),  .d(e2_d),      .q(o2[gc]));
+      nlc_greg #(.W(12)) u_dp2 (.clk(clk_i), .en(iw && st1),             .d(ld[11:0]),  .q(dp2[gc]));
+      nlc_greg #(.W(12)) u_e3  (.clk(clk_i), .en(iw && l3_in && !f2[0]), .d(e3_d),      .q(e3[gc]));
+      nlc_greg #(.W(12)) u_o3  (.clk(clk_i), .en(iw && l3_in && f2[0]),  .d(e3_d),      .q(o3[gc]));
+      nlc_greg #(.W(13)) u_dp3 (.clk(clk_i), .en(iw && st2),             .d(ld),        .q(dp3[gc]));
+      nlc_greg #(.W(12)) u_qa  (.clk(clk_i), .en(iw && st2),             .d(qa3[11:0]), .q(qa_prev[gc]));
     end
   endgenerate
 
-  // ---------------------------------------------------------------------------
-  // Issuer: symbol kk of channel rr's burst in frame j into the coder. A channel
-  // sample with an empty burst takes one clock and issues nothing.
-  // ---------------------------------------------------------------------------
-  logic [QW-1:0] hv, hmag;
-  logic [1:0]    hctx;
-  logic          is_esc;
-  logic [5:0]    hsym;
-  logic [15:0]   hraw;
-  logic          r_valid, r_ready, r_last;
-  logic [2:0]    nb;                     // burst size of frame j (all channels)
-  logic          b_end, unit_done;       // last symbol of the burst / channel sample done
-  assign nb     = burst_len(j[5:0]);
-  assign b_end  = 3'(kk) + 1'b1 == nb;
-  // Empty-burst frames (half of them) walk rr without issuing: the read muxes, ROM and
-  // state read see channel 0 meanwhile instead of toggling (operand isolation).
+  // A channel sample with an empty burst takes one clock and issues nothing; the
+  // coder sees channel 0 meanwhile instead of toggling (operand isolation).
   logic [SEL_W-1:0] rr_iss;
-  logic [W0-1:0]    v0;
-  logic [W1-1:0]    v1;
-  logic [W2-1:0]    v2;
-  logic [W3-1:0]    v3;
   assign rr_iss = nb != '0 ? rr : '0;
-  assign v0 = bq0[rr_iss];
-  assign v1 = bq1[rr_iss];
-  assign v2 = bq2[rr_iss];
-  assign v3 = bq3[rr_iss];
-  always_comb begin
-    case (kk)
-      2'd0:    hv = {{(QW-W0){v0[W0-1]}}, v0};
-      2'd1:    hv = {{(QW-W1){v1[W1-1]}}, v1};
-      2'd2:    hv = {{(QW-W2){v2[W2-1]}}, v2};
-      default: hv = v3;
-    endcase
-  end
   assign hctx   = kk == 2'd3 ? 2'd0 : kk + 1'b1;               // d1, d2, d3, a3
   assign hmag   = hv[QW-1] ? ~hv + 1'b1 : hv;                 // |v|
   assign is_esc = hmag > QW'(S_MAX);

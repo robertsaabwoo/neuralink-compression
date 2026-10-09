@@ -32,17 +32,22 @@ Frame rule (D5): `smp_tick` marks each new frame (from `s_frame`), `smp_short` f
 frame before it did not reach all selected slots; the encoder then aborts the packet (D6 path).
 
 **`nlc_lossy` (inside `nlc_encoder`, which is a lossy-only wrapper, D1).**
-1. *Wavelet:* 3 levels of LeGall 5/3 lifting (`nlc_lift53` x3), streaming, 64-sample blocks.
-   One shared combinational datapath; per-channel state = 3 registers per level, in rows
-   indexed by channel (time-multiplexed). All channels share one block position, so the
-   schedule is global.
+1. *Wavelet:* 3 levels of LeGall 5/3 lifting, streaming, 64-sample blocks, on **one shared
+   lifter** (`nlc_lift53`, 12 bit) driven by the issuer: a sample is only stored on arrival
+   (10 b per channel); the issuer lifts it one level per symbol it issues (kk = 0/1/2: level
+   1/2/3 -> d1/d2/d3, a 13-bit register carries a1/a2 between levels and then delta a3 for
+   kk = 3). A level whose pair is not complete only stores its input (level 1 in the
+   empty-burst frames, one clock per channel). Per-channel state = 3 registers per level, in
+   rows indexed by channel. All channels share one block position, so the schedule is global.
+   Issue order and cycle timing are those of the former burst buffer (area experiment B,
+   2026-10-09: -2 lifters, -32 b/ch of burst buffer).
 2. *Quantise:* right shifts d1 >> 3, d2 >> 2, d3 >> 2, a3 >> 1; a3 is delta-coded. Explicit
    bit slices, no signed casts (C-RTL-2).
-3. *Per-channel burst buffer*, 4 slots of 8/10/11/13 bits per channel (the lifting's value bounds): a sample pushes 0/1/2/4 symbols
-   (d1, d2, d3, delta a3) into fixed slots (slot = context). The issuer drains every burst at
-   once, frame by frame, channel by channel (`nlc.lossy.coding_order`, the bitstream order);
-   a frame needs at most 4 x 8 symbols against 256 clocks, so nothing lags (was: 8-deep
-   FIFO, one pop per sample, peak 7, 6-frame lag).
+3. *Issuer:* bursts of 0/1/2/4 symbols per sample (d1, d2, d3, delta a3; position =
+   context), taken as soon as the sample is there, frame by frame, channel by channel
+   (`nlc.lossy.coding_order`, the bitstream order); a frame needs at most 4 x 8 symbols
+   against 256 clocks, so nothing lags. The coder may lag up to a frame; more aborts (the
+   channel's next sample would overwrite the stored one).
 4. *rANS (`nlc_rans`):* one 22-bit state per channel, one symbol per clock, 2 stages:
    state read + ROM, then renorm + a 10-step combinational divider + write-back (`DIV_REG`
    can put registers back between the steps; the old 13-stage pipeline cost 547 more flops). Static tables in a synthesised ROM (`nlc_lossy_rom.v`):
@@ -86,7 +91,7 @@ byte.
 |---|---|
 | area | 59,200 um^2 lossy core (was 128,000), 66,000 um^2 `nlc_core`; 23% of an 8x2 TT design |
 | flip-flops | 1,573 + 127 clock gates in the lossy core (was 2,681) |
-| state per channel | ~178 b: 114 wavelet + 42 burst buffer + 22 coder (Neuralink spike path: 226 b/ch) |
+| state per channel | ~146 b: 114 wavelet + 10 sample + 22 coder (Neuralink spike path: 226 b/ch) |
 | timing | 122 ns slack at ss / 200 ns (TT top); deepest path ~117 cells (TT unit-delay gate sim needs < 200) |
 | power | `nlc_core` (system): 12.3 uW op, 0.93 uW idle. Lossy core: 8.1 uW op, 8.7 worst, 0.16 idle (was 629 uW; budget 40/16 uW, idle 10/2) |
 

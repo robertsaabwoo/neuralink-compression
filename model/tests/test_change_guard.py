@@ -51,7 +51,8 @@ def rtl_constants() -> dict:
     rans = (SRC / "nlc_rans.sv").read_text()
     shifts = {name: _int(rf"assign\s+{name}\s*=\s*quant\(.*?,\s*(\d+)\)\s*;", lossy, name)
               for name in ("q1", "q2", "q3", "qa3")}
-    levels = len(re.findall(r"^\s*nlc_lift53\s+#", lossy, re.M))
+    # one lifter is shared by the levels (time-multiplexed): the level count is a constant
+    levels = _int(r"localparam\s+int\s+LEVELS\s*=\s*(\d+)", lossy, "LEVELS")
     n_bits = _int(r"logic\s+\[(\d+):0\]\s+n;", lossy, "block frame counter n") + 1
     return {
         "adc_bits": _int(r"input\s+logic\s+\[(\d+):0\]\s+smp_data", lossy, "smp_data width") + 1,
