@@ -48,6 +48,8 @@
 
   "RUN_POST_GRT_RESIZER_TIMING": true,
 
+  "CLOCK_UNCERTAINTY_CONSTRAINT": 0.1,
+
   "//": "Configuration docs: https://librelane.readthedocs.io/en/latest/reference/configuration.html",
 
   "//": "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
