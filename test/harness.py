@@ -2,8 +2,8 @@
 
 The pin protocol is defined in src/project.v. Summary:
   ui_in = sample[7:0] / config byte; uio[1:0] = sample[9:8]
-  uio[2] s_strobe, uio[3] s_frame, uio[4] m_ack, uio[5] cfg_en   (inputs)
-  uio[6] m_valid, uio[7] m_last, uo_out = m_data                    (outputs)
+  uio[2] s_strobe, uio[3] s_frame, uio[5] cfg_en  (inputs)
+  uio[4] overflow, uio[6] m_valid, uio[7] m_last, uo_out = m_data  (outputs, registered)
 
 The ADC side never waits: one strobe every SLOT_CYCLES clocks, n_slots slots
 per frame, selected channels at their slots and random filler elsewhere.
@@ -29,7 +29,7 @@ SLOT_CYCLES = int(os.environ.get("SLOT_CYCLES", 2))
 FLUSH_CLOCKS = 2000                                    # lossy: lag frames + packet flush
 GATES = os.environ.get("GATES") in ("yes", "local")   # gate level: no internal probes
 
-S_STROBE, S_FRAME, CFG_EN = 2, 3, 5        # uio[4] unused (was m_ack; D8: no back-pressure)
+S_STROBE, S_FRAME, CFG_EN = 2, 3, 5        # uio[4]: overflow output (was m_ack; D8: no ack)
 
 
 class Pins:
@@ -73,7 +73,22 @@ async def write_reg(pins: Pins, addr: int, data: int) -> None:
     await pins.strobe(data)
     await FallingEdge(pins.dut.clk)
     pins.set_uio(1 << CFG_EN, 0)
-    await ClockCycles(pins.dut.clk, 2)
+    # the register is written 3 clocks after the data strobe's edge (2-flop synchroniser,
+    # edge detect, cfg_we): settle before the caller reads it back
+    await ClockCycles(pins.dut.clk, 3)
+
+
+async def read_reg(pins: Pins, addr: int) -> int:
+    """Config readback (CTRL.enable = 0): cfg_en = 1, strobe the address, read uo_out, drop
+    cfg_en without a data strobe (nothing is written)."""
+    pins.set_uio(1 << CFG_EN, 1 << CFG_EN)
+    await pins.strobe(addr)
+    await ClockCycles(pins.dut.clk, 4)
+    await FallingEdge(pins.dut.clk)
+    v = int(pins.dut.uo_out.value)
+    pins.set_uio(1 << CFG_EN, 0)
+    await ClockCycles(pins.dut.clk, 3)
+    return v
 
 
 async def configure(pins: Pins, cfg: dict) -> None:
@@ -143,3 +158,4 @@ async def run_vector_test(dut, mode: str) -> None:
 
     await ClockCycles(dut.clk, 20 * SLOT_CYCLES)
     assert not int(dut.m_valid.value), f"{mode}: extra output after the last packet"
+    assert not int(dut.overflow.value), f"{mode}: overflow pin set (a packet was dropped)"

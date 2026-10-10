@@ -1,14 +1,18 @@
 """Tests of the provided I/O plumbing (pins, config, slot selection).
 
-They probe internal signals, so they are RTL-only (skipped for GATES=yes),
-and they pass with any encoder, including the empty skeleton.
+Most probe internal signals, so they are RTL-only (skipped for GATES=yes), and pass with
+any encoder, including the empty skeleton. The DFT tests (readback, overflow pin) use the
+pins only; the overflow test needs the real encoder.
 """
+
+import os
+import random
 
 import cocotb
 from cocotb.triggers import ClockCycles, ReadOnly, RisingEdge
 
 import regs
-from harness import GATES, SLOT_CYCLES, drive_adc, reset, write_reg
+from harness import GATES, SLOT_CYCLES, drive_adc, read_reg, reset, write_reg
 
 
 @cocotb.test(skip=GATES)
@@ -63,3 +67,42 @@ async def test_slot_selector(dut):
     expected = [(i, v, int(i == 0), int(i == len(slots) - 1))
                 for fr in frames for i, v in enumerate(fr)]
     assert seen == expected, f"\n got {seen}\n exp {expected}"
+
+
+@cocotb.test()
+async def test_config_readback(dut):
+    """DFT: config registers read back on uo_out (cfg_en = 1, address strobe, enable = 0);
+    a readback writes nothing. Pins only, so it also runs at gate level."""
+    pins = await reset(dut)
+    slots = [3, 9, 17, 40, 77, 100, 126, 127]
+    await write_reg(pins, regs.N_SEL, 5)
+    for i, s in enumerate(slots):
+        await write_reg(pins, regs.SEL_SLOT + i, s)
+    assert await read_reg(pins, regs.N_SEL) == 5
+    for i, s in enumerate(slots):
+        assert await read_reg(pins, regs.SEL_SLOT + i) == s, f"slot register {i}"
+    assert await read_reg(pins, regs.CTRL) == 0
+    assert await read_reg(pins, 0x02) == 0                       # unused address
+    assert await read_reg(pins, regs.N_SEL) == 5                 # readbacks wrote nothing
+    assert not int(dut.m_valid.value)
+
+
+@cocotb.test(skip=os.environ.get("ENCODER") == "replay")
+async def test_overflow_pin(dut):
+    """DFT: the sticky overflow flag reaches uio[4]. 8 channels in 8-slot frames (16 clocks,
+    far below C-IF-9's 64) make the coder fall a frame behind; enable = 0 clears it."""
+    pins = await reset(dut)
+    n = regs.N_SEL_MAX
+    await write_reg(pins, regs.N_SEL, n)
+    for i in range(n):
+        await write_reg(pins, regs.SEL_SLOT + i, i)
+    await write_reg(pins, regs.CTRL, regs.MODE_LOSSY | regs.CTRL_ENABLE)
+    assert not int(dut.overflow.value)
+    rng = random.Random(1)
+    frames = [[rng.randrange(1024) for _ in range(n)] for _ in range(40)]
+    await drive_adc(pins, frames, list(range(n)), n)
+    await ClockCycles(dut.clk, 4)
+    assert int(dut.overflow.value), "coder a frame behind for 40 frames, overflow pin low"
+    await write_reg(pins, regs.CTRL, regs.MODE_LOSSY)
+    await ClockCycles(dut.clk, 4)
+    assert not int(dut.overflow.value), "overflow not cleared by enable = 0"

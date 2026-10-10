@@ -28,6 +28,8 @@ module nlc_core #(
     output wire                 m_last,     // with m_valid: the byte ends a packet
     output wire                 m_abort,    // abort token (D5/D7), one clock, m_valid = 0:
                                             // drop the partial packet
+    output wire                 enabled,    // CTRL.enable
+    output wire [7:0]           cfg_rdata,  // readback of the register at cfg_addr (DFT)
     output wire                 overflow    // sticky: the coder fell a frame behind
 );
 
@@ -53,8 +55,9 @@ module nlc_core #(
   nlc_cfg #(.N_SEL(N_SEL)) u_cfg (
       .clk(clk), .rst_n(rst_n),
       .cfg_we(cfg_we), .cfg_addr(cfg_addr), .cfg_data(cfg_data),
-      .enable(enable), .n_sel(n_sel), .sel_slots(sel_slots)
+      .enable(enable), .n_sel(n_sel), .sel_slots(sel_slots), .rdata(cfg_rdata)
   );
+  assign enabled = enable;
 
   wire                smp_valid;
   wire [ADC_BITS-1:0] smp_data;
