@@ -60,6 +60,8 @@ on synthetic data instead and print a `NO REAL DATA` warning; CI is synthetic on
 
 | doc | what |
 |---|---|
+| [docs/summary.md](docs/summary.md) | **start here**: one page, results with their caveats, verification, limits, next steps |
+| [docs/demo.md](docs/demo.md) | an 8-minute live demo, each step timed |
 | [docs/platform.md](docs/platform.md) | the environment the chip lives in: Neuralink's architecture, Tiny Tapeout limits |
 | [docs/architecture.md](docs/architecture.md) | how the RTL is built, what it costs, where to change what |
 | [docs/constraints.md](docs/constraints.md) | requirements (C-*) and decisions D1-D10 |

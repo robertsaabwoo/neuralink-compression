@@ -75,8 +75,8 @@ Final candidate = branch `area4-final-3x2` (RTL a0966c0, 3x2 tiles) unless state
 | TT design utilisation (3x2, D10) | 0.553 post-CTS (`cts_preview` 38058666284); pre-DFT all-in 3x2 signed off at 0.542 (38025684427) | 70% / 60% | PASS |
 | setup slack, ss, 200 ns | +129.0 ns (pre-layout) | >= 0 / 60 | PASS |
 | hold slack, ff | +0.187 ns pre-layout; +0.250 ns post-CTS (preview) | >= 0 | PASS |
-| power, running | routed, real data, signed off: **34.8 uW** TT top (e13, F20); pre-DFT all-in 3x2 preview 34.7 uW (synthetic data) | 40 / 16 | WARN |
-| power, idle | routed, real data: 9.5 uW (e13); final candidate preview 9.45 uW (synthetic data) | 10 / 2 | WARN |
+| power, running | routed, real data, signed off (gds 38060355759): TT chip **40.25 uW** = core 24.53 + TT pin interface 9.84 + clock root 2.20 + other 3.69; e13 was 34.8 uW (F20). TT standard image: 49.0 uW (preview, synthetic) | 40 / 16 | chip FAIL by 0.25 uW (pin interface); core PASS |
+| power, idle | routed, real data: TT chip **10.23 uW** = core 0.60 + pin interface 6.40 + clock root 2.20 + other 1.04; e13 9.5 uW. TT standard image: 17.1 uW (preview) | 10 / 2 | chip FAIL by 0.23 uW (pin interface); core PASS |
 | processing latency | 1,846 us (F1, F13) | 2,253 / 1,900 us (derived bound, C-LAT-1) | PASS |
 | delivery latency | 13.4 ms | 40 / 20 ms | PASS |
 | bits/sample, 160 held-out files | 2.087 | 2.2 / 2.1 | PASS |
