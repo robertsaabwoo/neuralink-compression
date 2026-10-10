@@ -14,12 +14,17 @@ module tb ();
       #(vcd_start);
       $dumpfile(vcd_file);
       $dumpvars(1, user_project);
-    end else begin
+    end else if (!$test$plusargs("nodump")) begin
       $dumpfile("tb.fst");
       $dumpvars(0, tb);
       #1;
     end
   end
+
+`ifdef SDF
+  // T-GL-3: back-annotate the routed netlist with LibreLane's SDF (make GATES=sdf)
+  initial $sdf_annotate(`SDF_FILE, user_project);
+`endif
 
   reg clk;
   reg rst_n;

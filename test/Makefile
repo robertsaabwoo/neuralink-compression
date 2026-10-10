@@ -5,6 +5,9 @@
 #   make GATES=yes          gate-level simulation of the hardened netlist (TT GDS action)
 #   make GATES=local NETLIST=<top_netlist.v>   gate level of our Yosys netlist (T-GL-2,
 #                           nlc-flow image: sky130 models in $NLC_PDK, no power pins)
+#   make GATES=sdf NETLIST=<nl.v> SDF=<file.sdf> [SIM=cvc]   real-delay gate level of the
+#                           routed netlist, SDF back-annotated (T-GL-3, .github/workflows/sdf_sim.yaml;
+#                           sky130 models in $NLC_PDK, specify blocks active: no FUNCTIONAL/UNIT_DELAY)
 #   CLK_NS (default 200 = 5 MHz), SLOT_CYCLES (default 2): see harness.py
 
 SIM ?= icarus
@@ -26,6 +29,17 @@ ifeq ($(GATES),local)
 NLC_PDK ?= /pdk
 SIM_BUILD = sim_build/gl_local
 COMPILE_ARGS += -DFUNCTIONAL -DUNIT_DELAY=\#1
+VERILOG_SOURCES += $(NETLIST) $(NLC_PDK)/verilog/primitives.v $(NLC_PDK)/verilog/sky130_fd_sc_hd.v
+
+else ifeq ($(GATES),sdf)
+
+NLC_PDK ?= /pdk
+SIM_BUILD = sim_build/gl_sdf_$(SIM)
+ifeq ($(SIM),cvc)
+COMPILE_ARGS += +define+SDF +define+SDF_FILE=\"$(SDF)\"
+else
+COMPILE_ARGS += -DSDF -DSDF_FILE=\"$(SDF)\" -gspecify -ginterconnect
+endif
 VERILOG_SOURCES += $(NETLIST) $(NLC_PDK)/verilog/primitives.v $(NLC_PDK)/verilog/sky130_fd_sc_hd.v
 
 else ifneq ($(GATES),yes)
@@ -53,7 +67,9 @@ VERILOG_SOURCES += $(CURDIR)/gate_level_netlist.v
 
 endif
 
+ifneq ($(SIM),cvc)
 COMPILE_ARGS += -I$(SRC_DIR) -g2012
+endif
 VERILOG_SOURCES += $(CURDIR)/tb.v
 TOPLEVEL = tb
 COCOTB_TEST_MODULES = test_plumbing,test_modes

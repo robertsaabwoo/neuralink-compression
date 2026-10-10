@@ -1,0 +1,126 @@
+# T-GL-3: real-delay gate-level simulation of a routed design (docs/testing.md T-GL-3,
+# docs/results.md F28). Takes a finished `gds` run's GDS_logs artifact: LibreLane's routed
+# netlist (final/nl, no power pins) and its SDF for one corner (final/sdf/<corner>), the sky130
+# cell models WITHOUT -DFUNCTIONAL / UNIT_DELAY (specify blocks active), $sdf_annotate, then the
+# TT-top tests through the pins at 200 ns (test_modes.test_lossy bit-exact, test_plumbing).
+# Simulators: CVC (open-src-cvc) runs the timing checks ($setuphold/$recrem/$width notifiers);
+# Icarus annotates delays but ignores timing checks (cross-check of the functional result).
+# Manual only: Actions > sdf_sim > Run workflow, or
+#   gh workflow run sdf_sim.yaml -R <repo> --ref <branch> -f run_id=<gds run> -f corner=nom_tt_025C_1v80
+name: sdf_sim
+
+on:
+  push:                  # registers the workflow; a push runs the defaults
+    branches: [sdf-sim]
+    paths: [.github/workflows/sdf_sim.yaml, scripts/sdf_prep.py, scripts/ci/sdf_summary.py, test/**]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "gds workflow run id (its GDS_logs artifact)"
+        required: true
+        default: "38025684427"
+      corner:
+        description: "SDF corner (final/sdf/<corner>)"
+        required: true
+        default: "nom_tt_025C_1v80"
+      sims:
+        description: "simulators, JSON list"
+        required: true
+        default: '["cvc", "icarus"]'
+      tests:
+        description: "cocotb test modules"
+        required: true
+        default: "test_modes,test_plumbing"
+
+permissions:
+  contents: read
+  actions: read          # download another run's artifacts
+
+jobs:
+  sdf:
+    name: sdf ${{ matrix.sim }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        sim: ${{ fromJSON(inputs.sims || '["cvc", "icarus"]') }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ inputs.run_id || '38025684427' }}
+      CORNER: ${{ inputs.corner || 'nom_tt_025C_1v80' }}
+      SIM: ${{ matrix.sim }}
+      TESTS: ${{ inputs.tests || 'test_modes,test_plumbing' }}
+      GL: ${{ github.workspace }}/gl
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: install tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y iverilog zlib1g-dev
+          pip install -r test/requirements.txt ciel
+          iverilog -V 2>&1 | head -1
+
+      - name: build CVC (open-src-cvc)
+        if: matrix.sim == 'cvc'
+        run: |
+          git clone --depth 1 https://github.com/cambridgehackers/open-src-cvc "$RUNNER_TEMP/cvc"
+          make -C "$RUNNER_TEMP/cvc/src" -j4 > "$RUNNER_TEMP/cvc_build.log" 2>&1 || { tail -50 "$RUNNER_TEMP/cvc_build.log"; exit 1; }
+          bin=$(find "$RUNNER_TEMP/cvc" -name cvc64 -type f -perm -u+x | head -1)
+          sudo cp "$bin" /usr/local/bin/cvc64
+          cvc64 2>&1 | head -3 || true
+          (cd "$RUNNER_TEMP/cvc" && git log -1 --format='open-src-cvc %h %cs')
+
+      - name: routed netlist and SDF of the gds run
+        run: |
+          rep=${{ github.repository }}
+          gh run view "$RUN_ID" -R "$rep" --json headSha,headBranch,displayTitle,conclusion \
+            --jq '"run \(env.RUN_ID): \(.headSha[0:7]) \(.headBranch) \(.conclusion) \(.displayTitle)"' | tee run.txt
+          art=$(gh api "repos/$rep/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[]|select(.name=="GDS_logs")|.id')
+          gh api "repos/$rep/actions/artifacts/$art/zip" > "$RUNNER_TEMP/gds.zip"
+          mkdir -p "$RUNNER_TEMP/gds" "$GL"
+          unzip -q "$RUNNER_TEMP/gds.zip" 'runs/wokwi/final/nl/*' "runs/wokwi/final/sdf/$CORNER/*" \
+            'runs/wokwi/pdk.json' -d "$RUNNER_TEMP/gds"
+          f="$RUNNER_TEMP/gds/runs/wokwi/final"
+          cp "$f"/nl/*.nl.v "$GL/nl.v"
+          cp "$f/sdf/$CORNER"/*.sdf "$GL/design.sdf"
+          cp "$RUNNER_TEMP/gds/runs/wokwi/pdk.json" "$GL/"
+          rm "$RUNNER_TEMP/gds.zip"
+          ls -la "$GL"; head -12 "$GL/design.sdf"
+
+      - name: sky130 PDK (version of the run)
+        run: |
+          v=$(python -c "import json; print(json.load(open('$GL/pdk.json'))['PDK_VERSION'])")
+          ciel enable --pdk-root "$HOME/pdk" --pdk-family sky130 "$v"
+          echo "NLC_PDK=$HOME/pdk/sky130A/libs.ref/sky130_fd_sc_hd" >> "$GITHUB_ENV"
+
+      - name: cell models and SDF for the simulator
+        run: python scripts/sdf_prep.py --pdk "$NLC_PDK" --netlist "$GL/nl.v" --sdf "$GL/design.sdf" --out "$GL"
+
+      - name: simulate (SDF, 200 ns clock)
+        working-directory: test
+        run: |
+          set -o pipefail
+          make GATES=sdf SIM=$SIM NETLIST="$GL/nl.v" SDF="$GL/sim.sdf" NLC_PDK="$GL/pdk" \
+            COCOTB_TEST_MODULES="$TESTS" COCOTB_PLUSARGS=+nodump 2>&1 | tee sim.log
+
+      - name: results
+        if: always()
+        run: python scripts/ci/sdf_summary.py --sim "$SIM" --corner "$CORNER" --run "$(cat run.txt)" --log test/sim.log --results test/results.xml | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: upload logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sdf_sim_${{ env.RUN_ID }}_${{ env.CORNER }}_${{ matrix.sim }}
+          path: |
+            test/sim.log
+            test/results.xml
+            gl/*.txt
+            gl/*.log
+          if-no-files-found: warn
