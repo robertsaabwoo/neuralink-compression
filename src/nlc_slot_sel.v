@@ -36,11 +36,11 @@ module nlc_slot_sel #(
 
   wire [7:0]      slot = s_frame ? 8'd0 : slot_cnt;
   wire [SEL_W:0]  idx  = s_frame ? {(SEL_W+1){1'b0}} : sel_idx;
-  wire [7:0]      want = sel_slots[8*idx[SEL_W-1:0] +: 8];
-  wire            hit  = (running | s_frame) && (idx < n_sel) && (slot == want);
-  // the same test on registered state only, for the slot after the current one: lets the
-  // pads load the sample only when it will be taken (frame strobes load regardless)
+  // the slot wanted next, on registered state only: lets the pads load the sample only when
+  // it will be taken (frame strobes load regardless). On s_frame idx is 0: one 8:1 mux.
   wire [7:0]      want_n = sel_slots[8*sel_idx[SEL_W-1:0] +: 8];
+  wire [7:0]      want = s_frame ? sel_slots[7:0] : want_n;
+  wire            hit  = (running | s_frame) && (idx < n_sel) && (slot == want);
   assign s_want = running && (sel_idx < n_sel) && (slot_cnt == want_n);
 
   // Clock gating: while disabled (enable = 0) the block is cleared asynchronously and

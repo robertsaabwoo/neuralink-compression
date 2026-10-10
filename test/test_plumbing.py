@@ -15,6 +15,9 @@ from harness import GATES, SLOT_CYCLES, drive_adc, reset, write_reg
 async def test_config_registers(dut):
     pins = await reset(dut)
     cfg = dut.user_project.core.u_cfg
+    # slot registers have no reset (written before enable): give them known values first
+    for i in range(regs.N_SEL_MAX):
+        await write_reg(pins, regs.SEL_SLOT + i, 0x11 * (i + 1))
     reset_slots = int(cfg.sel_slots.value)
     # retired addresses of the model-only modes (0x02-0x05 fpp/window/sbp, 0x20+ thresholds)
     # must not touch anything; CTRL's mode bits are ignored (lossy only, D1)

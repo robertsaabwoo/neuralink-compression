@@ -17,35 +17,28 @@ module nlc_cfg #(
 );
 `include "nlc_regs.vh"
 
-  reg [7:0] slot_r [0:N_SEL-1];
-
+  // Slot registers: storage written before use (hosts write the slots before setting
+  // enable, nlc_regs.vh), so no reset; one gated register each (plain flops, no hold mux).
   genvar g;
   generate
-    for (g = 0; g < N_SEL; g = g + 1) begin : g_flat
-      assign sel_slots[8*g +: 8] = slot_r[g];
+    for (g = 0; g < N_SEL; g = g + 1) begin : g_slot
+      nlc_greg #(.W(8)) u_slot (.clk(clk), .en(rst_n && cfg_we && cfg_addr == REG_SEL_SLOT + g),
+                                .d(cfg_data), .q(sel_slots[8*g +: 8]));
     end
   endgenerate
 
-  // clock-gated: the registers only see a clock edge on a write. Asynchronous reset:
-  // a synchronous one goes through logic that can stay X in gate-level sim.
+  // control registers: clock-gated, asynchronous reset (a synchronous one goes through
+  // logic that can stay X in gate-level sim)
   wire gclk;
-  nlc_icg u_cg (.clk(clk), .en(cfg_we), .gclk(gclk));
+  nlc_icg u_cg (.clk(clk), .en(cfg_we && (cfg_addr == REG_CTRL || cfg_addr == REG_N_SEL)),
+                .gclk(gclk));
 
-  integer i;
   always @(posedge gclk or negedge rst_n) begin
     if (!rst_n) begin
       enable <= 1'b0;
       n_sel  <= 1;
-      for (i = 0; i < N_SEL; i = i + 1) slot_r[i] <= i[7:0];
-    end else if (cfg_we) begin
-      case (cfg_addr)
-        REG_CTRL:  enable <= cfg_data[7];          // [1:0] mode: ignored (lossy only)
-        REG_N_SEL: n_sel  <= cfg_data[SEL_W:0];
-        default:
-          for (i = 0; i < N_SEL; i = i + 1)
-            if (cfg_addr == REG_SEL_SLOT + i[7:0]) slot_r[i] <= cfg_data;
-      endcase
-    end
+    end else if (cfg_addr == REG_CTRL) enable <= cfg_data[7];   // [1:0] mode: ignored
+    else                               n_sel  <= cfg_data[SEL_W:0];
   end
 
 endmodule
