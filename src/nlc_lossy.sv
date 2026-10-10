@@ -424,7 +424,9 @@ module nlc_lossy #(
   assign m_valid = c_valid && !skip;
   assign m_data  = need_hdr ? {2'b01, seq} : c_data[8 * bi +: 8];
   assign m_last  = !need_hdr && w_end && c_last;
-  assign c_ready = !need_hdr && w_end;
+  // qualified by c_valid: w_end reads the unreset word register (X until the first word); it
+  // reached the coder's clock gate and made m_valid X at gate level. Bit-identical (D8 11071e4).
+  assign c_ready = c_valid && !need_hdr && w_end;
 
   logic clk_o;
   nlc_icg u_cg_o (.clk(clk_l), .en(m_valid || abort_now || resume_now),
