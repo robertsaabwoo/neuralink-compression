@@ -3,11 +3,12 @@
   python scripts/sdf_prep.py --pdk <sky130_fd_sc_hd dir> --netlist nl.v --sdf design.sdf --out <dir>
 
 Writes <out>/pdk/verilog/{primitives.v,sky130_fd_sc_hd.v} (the PDK models, specify blocks kept)
-and <out>/sim.sdf. In the PDK models a sized cell (`sky130_fd_sc_hd__dfrtp_1`) is a wrapper
-around its base cell (`sky130_fd_sc_hd__dfrtp base (...)`), and the specify block (path delays,
-timing checks) lives in the base. OpenSTA's SDF names the sized cell, so each CELL entry whose
-type has no specify block of its own is retargeted to `<instance>.base` with the base cell type;
-INTERCONNECT entries stay on the wrapper's ports. <out>/sdf_prep.txt: what was done.
+and <out>/sim.sdf. In open_pdks' merged model file the sized cells (`sky130_fd_sc_hd__dfrtp_1`)
+carry their own specify block (path delays, $setuphold/$recrem/$width with notifiers), so the
+SDF applies as written (the 8afc834 PDK: 102 of 108 cell types, the rest are fill/tap/diode/conb).
+Fallback for a PDK whose sized cells wrap a base cell (`<base> base (...)`, the specify block in
+the base): each such CELL entry is retargeted to `<instance>.base` with the base cell type.
+<out>/sdf_prep.txt: what was done.
 """
 
 from __future__ import annotations
@@ -77,7 +78,8 @@ def main() -> None:
     log.append(f"SDF CELL entries: {n['kept']} kept, {n['retargeted']} retargeted to .base")
     for kind in ("IOPATH", "INTERCONNECT", "SETUP", "HOLD", "SETUPHOLD", "RECOVERY", "REMOVAL",
                  "WIDTH", "COND"):
-        log.append(f"  ({kind}: {len(re.findall(r'[(]' + kind + r'\b', sdf))}")
+        pat = r"[(]" + kind + r"\b"
+        log.append(f"  ({kind}: {len(re.findall(pat, sdf))}")
     for t in ("sky130_fd_sc_hd__dfrtp", "sky130_fd_sc_hd__dlclkp"):   # what the checks look like
         if t in mods:
             body = mods[t]
