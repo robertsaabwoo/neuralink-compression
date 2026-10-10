@@ -130,21 +130,22 @@ def main() -> None:
         log.append(f"cvc: {nchk} $setuphold/$recrem rewritten to the 1364-1995 form "
                    "($recrem -> $recovery + $removal), *_delayed nets assigned")
 
-    # INTERCONNECT into cells without a specify block (antenna diodes: no output, no function)
-    # is dropped: Icarus 13 aborts on it ("Could not insert intermodpath")
+    # INTERCONNECT from or into a cell without a specify block (antenna diodes, conb tie cells:
+    # no delay to annotate) is dropped: Icarus 13 cannot insert it ("Could not insert
+    # intermodpath", aborts on the diodes)
     inst_type = {i.lstrip("\\"): t for t, i in INST_NAME.findall(a.netlist.read_text())}
     sdf_in = a.sdf.read_text()
     dropped = 0
 
     def ic(m: re.Match) -> str:
         nonlocal dropped
-        dst = m.group(1).rsplit(".", 1)[0].replace("\\", "")
-        if inst_type.get(dst) in nospec:
+        ends = [x.rsplit(".", 1)[0].replace("\\", "") for x in m.groups()]
+        if any(inst_type.get(e) in nospec for e in ends):
             dropped += 1
             return ""
         return m.group(0)
 
-    sdf = re.sub(r"^\s*\(INTERCONNECT\s+\S+\s+(\S+)\s.*\n", ic, sdf_in, flags=re.M)
+    sdf = re.sub(r"^\s*\(INTERCONNECT\s+(\S+)\s+(\S+)\s.*\n", ic, sdf_in, flags=re.M)
 
     # escaped identifiers (`\u_cfg_addr.u_icg.u_cg ` in the netlist, `u_cfg_addr\.u_icg\.u_cg`
     # in the SDF) become plain ones in both: Icarus 13 cannot look them up from the SDF
@@ -160,7 +161,7 @@ def main() -> None:
     log.append(f"escaped identifiers made plain: {n_nl} in the netlist (sim_nl.v), "
                f"{n_sdf} SDF names")
     (a.out / "sim.sdf").write_text(sdf)
-    log.append(f"SDF: {dropped} INTERCONNECT entries into cells without a specify block dropped")
+    log.append(f"SDF: {dropped} INTERCONNECT entries from/into cells without a specify block dropped")
     for kind in ("CELL", "IOPATH", "INTERCONNECT", "SETUP", "HOLD", "SETUPHOLD", "RECOVERY",
                  "REMOVAL", "WIDTH", "COND"):
         pat = r"[(]" + kind + r"\b"

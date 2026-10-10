@@ -12,9 +12,8 @@ import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-# CVC: '"<file>"(<line>) ... timing violation ...' (Icarus runs no timing checks)
-VIOL = re.compile(r"timing violation|\$(setuphold|setup|hold|recovery|removal|recrem|width|period)"
-                  r"\b.*violat", re.I)
+# any simulator message about a timing-check violation (Icarus runs no timing checks)
+VIOL = re.compile(r"violation", re.I)
 CHECK = re.compile(r"\$(setuphold|setup|hold|recrem|recovery|removal|width|period)", re.I)
 INST = re.compile(r"(tb\.user_project\.[\w.\\\[\]]+)")
 MSG = re.compile(r"(ERROR|WARN|INFORM)\*\* \[\d+\]")
@@ -28,6 +27,7 @@ def main() -> None:
     ap.add_argument("--log", type=Path, required=True)
     ap.add_argument("--results", type=Path, required=True)
     ap.add_argument("--sdf-log", type=Path)
+    ap.add_argument("--selfcheck-log", type=Path)
     a = ap.parse_args()
 
     print(f"## T-GL-3 SDF gate level: {a.sim}, {a.corner}\n\n{a.run}\n")
@@ -58,6 +58,15 @@ def main() -> None:
         print("\nfirst violations:\n```")
         print("\n".join(viol[:15]))
         print("```")
+
+    if a.selfcheck_log:
+        st = (a.selfcheck_log.read_text(errors="replace").splitlines()
+              if a.selfcheck_log.exists() else [])
+        sv = [l for l in st if VIOL.search(l)]
+        print(f"\ntiming-check self-test (test_sdf: cfg_en swept through the clock edge): "
+              f"{len(sv)} violations, " + ("checks are live" if sv else "**checks NOT live**"))
+        if sv:
+            print("```\n" + "\n".join(sv[:5]) + "\n```")
 
     dly = [l.split("delay: ", 1)[1] for l in lines if "SDF clk->out delay" in l]
     mins = [l for l in dly if l.startswith("new min")]

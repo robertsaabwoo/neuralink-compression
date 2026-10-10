@@ -118,9 +118,18 @@ jobs:
           make GATES=sdf SIM=$SIM NETLIST="$GL/sim_nl.v" SDF="$GL/sim.sdf" NLC_PDK="$GL/pdk" \
             COCOTB_TEST_MODULES="$TESTS" COCOTB_PLUSARGS=+nodump 2>&1 | tee sim.log
 
+      - name: timing-check self-test (an input swept through the clock edge must be flagged)
+        if: always() && matrix.sim == 'cvc'
+        working-directory: test
+        run: |
+          cp sdf_cvc.log sdf_cvc_main.log
+          make GATES=sdf SIM=$SIM NETLIST="$GL/sim_nl.v" SDF="$GL/sim.sdf" NLC_PDK="$GL/pdk"             COCOTB_TEST_MODULES=test_sdf COCOTB_RESULTS_FILE=selfcheck.xml             COCOTB_PLUSARGS=+nodump > selfcheck.log 2>&1 || true
+          grep -ci violation selfcheck.log || true
+
       - name: results
         if: always()
-        run: python scripts/ci/sdf_summary.py --sim "$SIM" --corner "$CORNER" --run "$(cat run.txt)" --log test/sim.log --sdf-log test/sdf_cvc.log --results test/results.xml | tee -a "$GITHUB_STEP_SUMMARY"
+        run: |
+          python scripts/ci/sdf_summary.py --sim "$SIM" --corner "$CORNER" --run "$(cat run.txt)"             --log test/sim.log --sdf-log test/sdf_cvc_main.log --results test/results.xml             $([ "$SIM" = cvc ] && echo --selfcheck-log test/selfcheck.log) | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: upload logs
         if: always()
@@ -129,7 +138,8 @@ jobs:
           name: sdf_sim_${{ env.RUN_ID }}_${{ env.CORNER }}_${{ matrix.sim }}
           path: |
             test/sim.log
-            test/sdf_cvc.log
+            test/sdf_cvc_main.log
+            test/selfcheck.log
             test/results.xml
             gl/*.txt
             gl/pdk/verilog/sky130_fd_sc_hd.v
