@@ -13,6 +13,8 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: pytest -q
       - run: python scripts/benchmark.py --synthetic --channels 8
+      # bring-up diagnosis tool: 26 model-level fault cases on synthetic data (~30 s)
+      - run: python scripts/bringup/selftest.py
 
   rtl-sim:
     runs-on: ubuntu-latest
