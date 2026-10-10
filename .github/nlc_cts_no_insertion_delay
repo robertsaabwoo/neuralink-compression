@@ -1,3 +1,0 @@
-Experiment marker (docs/results.md F19): CI builds LibreLane's image with
-`clock_tree_synthesis -no_insertion_delay` (scripts/ci/librelane_no_insertion_delay.sh)
-and uses it for the gds and cts_preview workflows. Not the TT-standard flow.
