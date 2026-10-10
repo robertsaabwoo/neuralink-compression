@@ -14,7 +14,8 @@ toggle a notifier into the flop UDP). Unused cells would only be elaborated as t
 --sim cvc: OSS CVC ignores the optional $setuphold/$recrem arguments (timestamp/timecheck
 conditions, delayed reference/data nets), which leaves the cells' *_delayed nets undriven (all
 flops X). Rewritten in 1364-1995 form: the conditions move onto the events (`&&& cond`) and
-`assign X_delayed = X;`. The checks then work on the undelayed signals, so a negative SDF
+`assign X_delayed = X;`; $recrem is split into $recovery + $removal (CVC annotates SDF
+RECOVERY/REMOVAL only onto those). The checks then work on the undelayed signals, so a negative SDF
 limit (sky130 has negative hold/setup on some arcs) is clamped to 0: pessimistic, never misses
 a violation the delayed-signal form would flag.
 """
@@ -28,6 +29,7 @@ from pathlib import Path
 
 MOD = re.compile(r"^\s*module\s+(\w+)\b.*?^\s*endmodule\b", re.S | re.M)
 INST = re.compile(r"^\s*(sky130_fd_sc_hd__\w+)\s+(?:#\s*\(.*?\)\s*)?\\?\S+\s*\(", re.M)
+INST_NAME = re.compile(r"^\s*(sky130_fd_sc_hd__\w+)\s+(\\?\S+)\s*\(", re.M)
 CHECK = re.compile(r"(\$(?:setuphold|recrem))\s*\((.*?)\)\s*;", re.S)
 
 
@@ -61,6 +63,9 @@ def cvc_form(mod: str) -> tuple[str, int]:
         if conds[1] and "&&&" not in data:
             data = f"{data} &&& {conds[1]}"
         n += 1
+        if task == "$recrem":            # CVC matches SDF RECOVERY/REMOVAL only to these
+            return (f"$recovery ( {ref} , {data} , ({lim1}) , {notifier} ) ;\n"
+                    f"$removal ( {ref} , {data} , ({lim2}) , {notifier} ) ;")
         return f"{task} ( {ref} , {data} , ({lim1}) , ({lim2}) , {notifier} ) ;"
 
     mod = CHECK.sub(sub, mod)
@@ -115,11 +120,26 @@ def main() -> None:
         out += ["`celldefine", body, "`endcelldefine", ""]
     (vdir / "sky130_fd_sc_hd.v").write_text("\n".join(out))
     if a.sim == "cvc":
-        log.append(f"cvc: {nchk} $setuphold/$recrem rewritten to the 1364-1995 form, "
-                   "*_delayed nets assigned")
+        log.append(f"cvc: {nchk} $setuphold/$recrem rewritten to the 1364-1995 form "
+                   "($recrem -> $recovery + $removal), *_delayed nets assigned")
 
-    sdf = a.sdf.read_text()
-    shutil.copy(a.sdf, a.out / "sim.sdf")
+    # INTERCONNECT into cells without a specify block (antenna diodes: no output, no function)
+    # is dropped: Icarus 13 aborts on it ("Could not insert intermodpath")
+    inst_type = {i.lstrip("\\"): t for t, i in INST_NAME.findall(a.netlist.read_text())}
+    sdf_in = a.sdf.read_text()
+    dropped = 0
+
+    def ic(m: re.Match) -> str:
+        nonlocal dropped
+        dst = m.group(1).rsplit(".", 1)[0].replace("\\", "")
+        if inst_type.get(dst) in nospec:
+            dropped += 1
+            return ""
+        return m.group(0)
+
+    sdf = re.sub(r"^\s*\(INTERCONNECT\s+\S+\s+(\S+)\s.*\n", ic, sdf_in, flags=re.M)
+    (a.out / "sim.sdf").write_text(sdf)
+    log.append(f"SDF: {dropped} INTERCONNECT entries into cells without a specify block dropped")
     for kind in ("CELL", "IOPATH", "INTERCONNECT", "SETUP", "HOLD", "SETUPHOLD", "RECOVERY",
                  "REMOVAL", "WIDTH", "COND"):
         pat = r"[(]" + kind + r"\b"
