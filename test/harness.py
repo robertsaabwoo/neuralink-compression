@@ -73,7 +73,9 @@ async def write_reg(pins: Pins, addr: int, data: int) -> None:
     await pins.strobe(data)
     await FallingEdge(pins.dut.clk)
     pins.set_uio(1 << CFG_EN, 0)
-    await ClockCycles(pins.dut.clk, 2)
+    # the register is written 3 clocks after the data strobe's edge (2-flop synchroniser,
+    # edge detect, cfg_we): settle before the caller reads it back
+    await ClockCycles(pins.dut.clk, 3)
 
 
 async def configure(pins: Pins, cfg: dict) -> None:
