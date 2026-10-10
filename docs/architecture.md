@@ -1,7 +1,9 @@
-# Architecture (as built, 2026-10-07)
+# Architecture (as built: commit 921e1e0, "e13", signed off 2026-10-09)
 
-What the RTL does today. Requirements: [constraints.md](constraints.md). Numbers:
-[results.md](results.md). Decisions D5-D7 are **not implemented yet**; where they land is marked.
+What the RTL on this branch does. Requirements: [constraints.md](constraints.md). Numbers:
+[results.md](results.md). Decisions D5-D7 (frame rule, abort, reset) are implemented. Newer
+area work (shared lifter, looped divider, latch rows, valid-only output D8) lives on the
+`area3-*` / `area4-*` branches and is not described here.
 
 ```
  TT pins ─► project.v ─► nlc_core ──────────────────────────────────────────────► TT pins
@@ -16,8 +18,11 @@ One clock, 5 MHz = the ADC slot rate (D2). At most one sample per clock; the ADC
 
 ## Blocks
 
-**`project.v` (TT top).** Registers all inputs once; `s_strobe` and `m_ack` are edge-detected
-into one-clock pulses. A strobe carries one 10-bit sample (`ui_in` + `uio[1:0]`, `s_frame` =
+**`project.v` (TT top).** Registers all inputs once (single flop, no synchroniser: see README
+known limitations), in three gated clock groups (F19/F20): the strobe, ack and `cfg_en` levels
+and edge detectors on an always-on gate; `s_frame` on strobes; the sample/config byte only on a
+strobe of a selected slot (`s_want` from the slot selector), a frame strobe or a config strobe.
+`s_strobe` and `m_ack` are edge-detected into one-clock pulses. A strobe carries one 10-bit sample (`ui_in` + `uio[1:0]`, `s_frame` =
 slot 0), or a config byte (address, then data) while `cfg_en` = 1. Output: byte on `uo_out`,
 `m_valid`/`m_last` on `uio[6]/[7]`, host pulses `m_ack`. The pin path manages one sample per 2
 clocks at most: it is for slow real-data tests (C-IF-9).
@@ -63,11 +68,14 @@ state row, stage A, the output word and the serialiser buffer. Control registers
 asynchronously on `clr_n` (`rst_n && enable`), so a disabled core sees no clock edge.
 RTL simulation models `nlc_greg` as an enable flop (same behaviour, faster in Icarus);
 synthesis and gate-level use the real cell (`+define+NLC_ICG_SIM` simulates the gate in RTL).
-Only `overflow` runs on `clk` in the core. Outside it: `nlc_cfg` (one gate, opens on a config
+Since e13 one more gate, `u_cg_core` in `nlc_core`, sits in front of the whole core: it is open
+only while enabled, on a config write, while the FIFO holds bytes, or while the encoder needs
+its disable edge / abort token (idle 0.80 uW core share, F20). Only `overflow` runs on the core
+clock without a block gate. Outside the lossy core: `nlc_cfg` (one gate, opens on a config
 write), `nlc_out_fifo` (a gate per entry, one for the pointers), `nlc_slot_sel` (async clear
 on `rst_n && enable`, counters gated on slots while enabled, sample registers on a hit),
-`project.v` (config address/data gated). Clocked every cycle: the TT pin registers and
-the few flops that must run (`slot_sel` counters while enabled).
+`project.v` (pin registers in three gated groups, above). Clocked on every core clock: the
+few flops that must run (`slot_sel` counters while enabled).
 
 **Abort (D5/D6/D7).** `nlc_lossy` aborts the packet in flight when the coder falls more than
 a frame behind (blocked output: the next burst would overwrite one not yet coded) or on a
@@ -80,17 +88,22 @@ byte.
 
 **`nlc_out_fifo`.** 8 entries of {abort, last, byte}, valid/ready; `m_abort` with the head.
 
-## Cost today
+## Cost (e13)
+
+Synthesis: local check flow (`reports/*/lossy_stat.txt`, `top_stat.txt`); the lossy core RTL is
+unchanged from `a9c2329`. Routed: LibreLane metrics of gds run 37865677796.
 
 | | value |
 |---|---|
-| area | 59,200 um^2 lossy core (was 128,000), 66,000 um^2 `nlc_core`; 23% of an 8x2 TT design |
-| flip-flops | 1,573 + 127 clock gates in the lossy core (was 2,681) |
+| area, synthesised | 60,050 um^2 lossy core (was 128,000 before clock gating), 67,100 um^2 `nlc_core`, ~68,200 um^2 TT top |
+| area, routed | 102,600 um^2 standard cells (logic 43.3k, flops 39.1k, repair + hold buffers 11.7k, clock buffers 2.5k, clock gates 2.6k), utilisation 0.69 of the 4x2 core (149,200 um^2) |
+| flip-flops | 1,582 + 127 clock gates in the lossy core (was 2,681) |
 | state per channel | ~178 b: 114 wavelet + 42 burst buffer + 22 coder (Neuralink spike path: 226 b/ch) |
-| timing | 122 ns slack at ss / 200 ns (TT top); deepest path ~117 cells (TT unit-delay gate sim needs < 200) |
-| power | `nlc_core` (system): 12.3 uW op, 0.93 uW idle. Lossy core: 8.1 uW op, 8.7 worst, 0.16 idle (was 629 uW; budget 40/16 uW, idle 10/2) |
+| timing | routed: +118.5 ns setup at ss / 200 ns, +0.187 ns hold at ff. Pre-layout deepest path ~117 cells (TT unit-delay gate sim needs < 200) |
+| power | routed, real data, whole TT design: 34.8 uW op, 9.5 uW idle (core share 23.8 / 0.80), patched CTS image (results.md F20). Pre-layout: `nlc_core` 12.5 / 1.07 uW, lossy core 8.3 uW op, 0.16 idle (was 629 uW; budget 40/16 uW, idle 10/2) |
 
-Remaining levers (2026-10-08, docs/results.md): latch-based storage for the gated rows
+Remaining levers (2026-10-08, docs/results.md; several are now being tried on the `area3-*` /
+`area4-*` branches): latch-based storage for the gated rows
 (~-8k um^2, same-cycle read/write hazards); the read muxes (8:1 x 114 b wavelet state, 32:1 x
 13 b bursts, ~9k um^2) only go away with rotating storage, which costs ~+6.5 uW; register
 widths are already at the filter bounds; removing coder stage A saves 64 flops but no area.

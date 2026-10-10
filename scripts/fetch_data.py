@@ -1,10 +1,11 @@
 """Unpack the Neuralink compression-challenge dataset into data/raw.
 
-  python scripts/fetch_data.py                 # download from the published URL
+  python scripts/fetch_data.py                 # download the archived copy
   python scripts/fetch_data.py path/to/data.zip   # use a local copy
 
-The published URL returned 404 on 2026-10-06; use a local copy of data.zip
-(143 MB) if it is still down.
+The original URL (https://content.neuralink.com/compression-challenge/data.zip) returns 404
+since 2026-10-06. URL points to the Internet Archive snapshot of it (65 MB zip, 743 WAV files,
+143 MB unpacked; checked 2026-10-10: file count and a sample hash match a local copy).
 """
 
 from __future__ import annotations
@@ -14,7 +15,8 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-URL = "https://content.neuralink.com/compression-challenge/data.zip"
+URL = ("https://web.archive.org/web/20250804221732id_/"
+       "https://content.neuralink.com/compression-challenge/data.zip")
 ROOT = Path(__file__).resolve().parents[1] / "data"
 
 

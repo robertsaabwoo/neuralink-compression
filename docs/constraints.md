@@ -62,7 +62,7 @@ describe what the host sees. How the RTL does it is a design-phase item.
 **Abort token (D6, D7).** At the `nlc_core` boundary a new output `m_abort` qualifies a
 transfer: `m_valid` = `m_abort` = 1 means "discard the bytes of the current packet"; it travels
 through the output FIFO in order with the bytes. On the TT pins (no free uio pin) the suggested
-encoding is `m_last` = 1 while `m_valid` = 0; to be fixed when the TT top is updated. Tests
+encoding is `m_last` = 1 while `m_valid` = 0 (implemented in `src/project.v`). Tests
 T-OVF-*, T-IF-3, T-ROB-2/3 read `m_abort` when the port exists.
 
 ## 4. Latency
@@ -72,7 +72,7 @@ measure different things (platform.md section 3). Both are tracked:
 
 | ID | constraint | limit | target | expected (derived) | tests |
 |---|---|---|---|---|---|
-| C-LAT-1 | **Processing latency**: sample slot -> its symbol enters the rANS coder | 1 ms [3] | 8 frames = 410 us | queue only: 6-frame FIFO lag + 13-stage pipeline = ~310 us (measured 307 us). **Measured including the transform look-ahead (36 frames): 2.0 ms** (F1, docs/testing.md section 3). Open: which definition the 1 ms applies to | T-LAT-1 |
+| C-LAT-1 | **Processing latency**: sample slot -> its symbol enters the rANS coder | 1 ms [3] | 8 frames = 410 us | queue only: 6-frame FIFO lag + 13-stage pipeline = ~310 us (measured 307 us). **Measured including the transform look-ahead (36 frames): 2.0 ms, 1,846 us since the eager drain** (F1, F13). Open: which definition the 1 ms applies to | T-LAT-1 |
 | C-LAT-2 | **Delivery latency**: sample slot -> last byte of its packet accepted by the host (packet decodable) | 40 ms [2] | 20 ms | 256 + 6 frames = 13.4 ms + drain | T-LAT-1 |
 | C-LAT-3 | Packet window | 10-40 ms [2] | | 256 frames x 51.2 us = 13.1 ms | T-LAT-1 |
 
@@ -82,7 +82,7 @@ measure different things (platform.md section 3). Both are tracked:
 |---|---|---|---|---|
 | C-BW-1 | Typical output rate on real data | ~326 kbit/s (2.087 b/sample x 8 ch x 19.53 kHz) | derived | T-BW-1 |
 | C-BW-2 | Worst-case output rate over any frame and any packet (LFSR noise, full-scale square waves, escapes on every symbol), and the worst burst (packet flush) | **measured**: LFSR 21.4 bits/sample = 3.36 Mbit/s, up to **101 bytes/frame** since the eager FIFO drain (was 45: bursts are now coded in the frame they are pushed), flush 28 bytes (real data: 325 kbit/s, peak 30 bytes/frame) | T-BW-1, 2026-10-08 | T-BW-1 |
-| C-BW-3 | Host requirement, published in the README/datasheet: the slowest host turnaround (clocks per byte) at which worst-case data gives no overflow | **measured: 4 clocks/byte (0.8 us at 5 MHz)** on LFSR data, 2 packets; 5 loses data. Was 11 before the eager FIFO drain; accepted by the user 2026-10-08: the real consumer is on-chip (~1 byte/clock), and 4 is about the TT pin protocol's own limit (2 clocks after each m_ack edge) | T-BW-2, 2026-10-08 | T-BW-2 |
+| C-BW-3 | Host requirement, published in the README/datasheet: the slowest host turnaround (clocks per byte) at which worst-case data gives no overflow | **measured: 4 clocks/byte (0.8 us at 5 MHz)** on LFSR data, 2 packets; 5 loses data. Was 11 before the eager FIFO drain; accepted by the user 2026-10-08: the real consumer is on-chip (~1 byte/clock), and 4 is about the TT pin protocol's own limit (2 clocks after each m_ack edge). Not a worst-case guarantee: with every symbol at 4 bytes the bound needs 2 clocks/byte (results.md F5) | T-BW-2, 2026-10-08 | T-BW-2 |
 | C-BW-4 | Radio budget context (informational): 1 Mbps for 1024 channels = ~980 bit/s/ch; lossy is ~40 kbit/s/ch, i.e. only a few broadband channels fit | derived [3] | T-ALG-2 report |
 
 ## 6. Timing (sky130_fd_sc_hd, pre-layout then TT sign-off)
@@ -137,7 +137,7 @@ bit has no source (platform.md section 1), so ratios that depend on it are infor
 | C-RTL-1 | Verilator lint: 0 errors; `-Wall` clean on the lossy core | TT's flow lints; errors stop the GDS build | T-LINT-1 |
 | C-RTL-2 | No signed casts, `>>>` or signed compares in synthesised code; write sign handling as explicit bit slices | Yosys and Icarus disagreed (7,033 vs 670 bytes) | T-GL-1, T-EQ-1 |
 | C-RTL-3 | Control registers behind a clock gate reset asynchronously; storage without reset uses `nlc_greg`. A synchronous reset synthesised through logic can stay X in gate-level simulation (X-pessimism on reconvergent logic, F16), and it would also hold the gate open | output FIFO pointers stayed X at gate level, 2026-10-08 | T-GL-2, T-PWR-2 |
-| C-RTL-3 | All synthesised files listed in `info.yaml`, `test/Makefile` and `LOSSY_SRC` in `scripts/flow/flow.py` | the three lists drift | T-INF-2 |
+| C-RTL-4 | All synthesised files listed in `info.yaml`, `test/Makefile` and `LOSSY_SRC` in `scripts/flow/flow.py` | the three lists drift | T-INF-2 |
 
 ## Sources
 

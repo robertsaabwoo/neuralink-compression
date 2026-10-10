@@ -81,7 +81,8 @@ power scenarios of 4.4 (`test_power_op/n4/worst/floor`), `gl_dump.v` takes `+vcd
 | 2026-10-08 | D5-D7 implemented (abort/skip/resume, abort token, short frame = abort); lint, rtl, core (10.7 min), replay | **all pass: test/core 48/48, KNOWN_FAIL empty**; lossy 8/8, TT top 4/4, replay 4/4. Gate level / STA not re-run for D5-D7 (functional check only, as asked); `gds` action on the 4x2 tiles is the next hardening check |
 | 2026-10-08 | `layout` on the routed design of `a9c2329` (T-PWR-3, T-FAN-1); `power` re-run on D5-D7 RTL | routed netlist bit-exact on real data through the pins; 80.0 uW op / 51.4 uW idle (pre-layout same scenario 16.8 / 6.0), clock buffers 47.8 / 39.4 uW (F17); 3,283 / 366 slew pins at ss / tt, same as LibreLane (F18); T-PWR-1/2 on D5-D7: lossy 8.30 uW, core 12.5 / 1.07 uW (annotator change verified neutral: identical activity on the same VCD) |
 
-Findings F1-F9, budgets and the measured data: [results.md](results.md).
+| 2026-10-09 | e13 (`921e1e0`: pin registers in gated groups, selective pin loads, core gate, patched CTS image): TT gds/gl_test/precheck (run 37865677796), then `layout` locally | signed off; routed netlist bit-exact on real data; **34.8 uW op / 9.5 uW idle** (core share 23.8 / 0.80), hold +0.187 ns, utilisation 0.69 (results.md F20). CI on this commit: `ci` (model, rans, lossy, TT top, `test/core` T-IF-*), TT `test`: pass |
+Findings F1-F21, budgets and the measured data: [results.md](results.md).
 
 ## 4. Verification plan (testing phase)
 
@@ -174,7 +175,7 @@ happens later; the test only tells you which parameter is affected.
 |---|---|---|---|---|
 | T-IF-1 | `nlc_core` at the real interface: 256 slots, one per clock, n_sel = 8, real data, >= 4 packets | bit-exact, 0 lost samples | C-IF-1..3, C-FN-1/2 | exists, pass |
 | T-IF-2 | Slot selection sweep: n_sel 1..8; slots {0}, {255}, {0..7}, {248..255}, spread, random ascending sets (seeded) | bit-exact for each | C-IF-4 | exists, pass (11 slot sets) |
-| T-IF-3 | Start-up: enable mid-frame -> first packet starts at the next `s_frame`, seq 0; enable -> disable -> enable == fresh run | bit-exact, seq 0 | C-IF-5/6 | exists: mid-frame enable pass; re-enable **fails (F2)** |
+| T-IF-3 | Start-up: enable mid-frame -> first packet starts at the next `s_frame`, seq 0; enable -> disable -> enable == fresh run | bit-exact, seq 0 | C-IF-5/6 | exists, pass (since D5-D7) |
 | T-IF-4 | TT top through the pins at 5 MHz: config, pin path (C-IF-9), host model reading with the ack protocol | bit-exact | C-IF-9/10 | exists, pass (`test_modes.test_lossy` at 200 ns) |
 | T-IF-5 | TT top with the generator (T-GEN-2) at full rate | bit-exact | C-IF-1, G-* | new |
 
@@ -182,8 +183,8 @@ happens later; the test only tells you which parameter is affected.
 
 | ID | test | pass | covers | status |
 |---|---|---|---|---|
-| T-OVF-1 | Host stops for a whole packet, then resumes | complete packets bit-exact, the cut packet ends with the abort token, seq gap = lost packets (D6) | C-OVF-1/2 | exists, **fails (F3)** |
-| T-OVF-2 | Stalls starting at the header, mid-payload, in the flush (`NLC_LONG=1`: 4 lengths each) | every packet starting after the resume delivered, nothing outside the stall lost (D6) | C-OVF-3/4 | exists, **fails (F3)** except a 300-clock stall |
+| T-OVF-1 | Host stops for a whole packet, then resumes | complete packets bit-exact, the cut packet ends with the abort token, seq gap = lost packets (D6) | C-OVF-1/2 | exists, pass (abort + seq gap, D6, since `a9c2329`) |
+| T-OVF-2 | Stalls starting at the header, mid-payload, in the flush (`NLC_LONG=1`: 4 lengths each) | every packet starting after the resume delivered, nothing outside the stall lost (D6) | C-OVF-3/4 | exists, pass (since D5-D7) |
 | T-OVF-3 | Today's behaviour, recorded as the "before" point: byte drop + sticky flag | documents the gap to C-OVF-1 | exists (records F3) |
 
 **Latency and bandwidth (measured by monitors, scored by the flow)**
@@ -192,17 +193,17 @@ happens later; the test only tells you which parameter is affected.
 |---|---|---|---|---|
 | T-LAT-1 | Timestamp every sample: slot -> coder input, slot -> last byte of its packet; report min/median/max | C-LAT-1/2 limits | C-LAT-1..3 | exists (T-IF-1 monitors) |
 | T-BW-1 | Bytes per frame and per packet (histogram), output FIFO peak occupancy, flush burst length; real, LFSR and edge-pattern data plus model-guided worst packets (4.1) | report; worst case feeds C-BW-3 | C-BW-1/2 | exists, pass |
-| T-BW-2 | Host turnaround sweep (clocks per byte) on worst-case data: find the slowest host with 0 overflow, then verify that host for >= 16 packets | value recorded as the published host requirement | C-BW-3, C-OVF-5 | exists, pass: **11 clocks/byte** |
+| T-BW-2 | Host turnaround sweep (clocks per byte) on worst-case data: find the slowest host with 0 overflow, then verify that host for >= 16 packets | value recorded as the published host requirement | C-BW-3, C-OVF-5 | exists, pass: **4 clocks/byte** on LFSR data (was 11 before F13; not a worst-case bound, results.md F5) |
 
 **Robustness**
 
 | ID | test | pass | covers | status |
 |---|---|---|---|---|
 | T-ROB-1 | Long run: >= 70 packets (seq wraps past 63) with the generator, RTL | bit-exact, seq wraps | C-FN-4 | exists (`NLC_LONG=1`), not run yet |
-| T-ROB-2 | Reset and disable at random points (mid-frame, mid-packet, during flush, during host stall); next run == fresh run | bit-exact, no hang | C-IF-6 | exists, **fails (F2)** |
-| T-ROB-3 | Config written while enabled (illegal), then disable/enable | no hang; correct afterwards | C-IF-7 | exists, **fails (F2)** |
-| T-ROB-4 | Frame faults: early `s_frame` (3 variants), late, missing; strict against the frame rule D5 | bit-exact | C-IF-8 | exists: long/missing pass, short x3 **fail (F4)** |
-| T-ROB-5 | Power-up state: Verilator 2-state with random register init (several seeds) and Icarus/GL with X-init; output identical | identical bytes for all seeds; no X on outputs after the first frame | C-FN-6 | exists, pass (random deposit, 234 regs, 3 seeds) |
+| T-ROB-2 | Reset and disable at random points (mid-frame, mid-packet, during flush, during host stall); next run == fresh run | bit-exact, no hang | C-IF-6 | exists, pass (since D5-D7, `a9c2329`) |
+| T-ROB-3 | Config written while enabled (illegal), then disable/enable | no hang; correct afterwards | C-IF-7 | exists, pass (since D5-D7) |
+| T-ROB-4 | Frame faults: early `s_frame` (3 variants), late, missing; strict against the frame rule D5 | bit-exact | C-IF-8 | exists, pass (short frames abort per D5, since `a9c2329`) |
+| T-ROB-5 | Power-up state: Verilator 2-state with random register init (several seeds) and Icarus/GL with X-init; output identical | identical bytes for all seeds; no X on outputs after the first frame | C-FN-6 | exists, pass (random deposit into every `nlc_greg`, 3 seeds; Icarus only, no Verilator 2-state variant yet) |
 | T-ROB-6 | Random regression: N seeded runs mixing data source, n_sel, slots, host model and stalls (nightly) | 0 failures; failing seed reproducible | all C-FN, C-IF | exists, pass (4 seeds) |
 | T-ROB-7 | `rst_n` mid-packet, during the flush, during a host stall | output empty right after reset; next run == run from power-up (D7) | C-IF-6 | exists, pass |
 
@@ -213,7 +214,7 @@ happens later; the test only tells you which parameter is affected.
 | T-LINT-1 | Verilator lint: lossy core `-Wall`, TT top errors | 0 errors | C-RTL-1 | exists |
 | T-GL-1 | Lossy core netlist (sky130 cells) runs `test/lossy` at 200 ns | bit-exact | C-FN-5, C-RTL-2 | exists |
 | T-GL-2 | **TT top** netlist (like TT's `gl_test`) runs T-IF-4 and T-IF-5 | bit-exact | C-FN-5, C-TIM-4 | exists, pass (Yosys netlist, `GATES=local`) |
-| T-GL-3 | Post-layout gate-level with SDF from the TT GDS action | bit-exact | C-FN-5, C-TIM-1 | new (after first GDS run) |
+| T-GL-3 | Post-layout gate-level with SDF from the TT GDS action | bit-exact | C-FN-5, C-TIM-1 | new: open (routed gate level is unit-delay only, F21) |
 | T-EQ-1 | RTL vs netlist equivalence (Yosys `equiv_*` or SymbiYosys) as a fast check next to T-GL-1 | proven equivalent | C-FN-5, C-RTL-2 | new |
 | T-FV-1 | Formal properties on the plumbing (SymbiYosys): out FIFO keeps order and never loses data when not full; slot selector emits each configured slot exactly once per frame, in order | proven (bounded) | C-IF-2/4 | new |
 | T-STA-1 | OpenSTA: setup at ss, 200 ns; hold at ff; report Fmax at ss | C-TIM-1/2 | C-TIM-1/2/5 | extend (TT clock -> 200 ns) |
@@ -222,9 +223,9 @@ happens later; the test only tells you which parameter is affected.
 | T-PWR-1 | Power matrix at 5 MHz, tt corner (4.4) | C-PWR-1..5 | C-PWR-* | extended: scenarios op/n4/worst/floor + idle; op measured |
 | T-PWR-3 | **Post-layout power**: the routed netlist of the last GDS run (clock tree as CTS built it, repair and hold buffers) simulated through the TT pins on real data at the operating frame rate (128 slots x 2 clocks = 256 clocks/frame, 8 channels, `test/test_power.py`), bytes checked against the model; OpenSTA with the sign-off SDC (propagated clock) and extracted parasitics (nom SPEF). Clock-network nets use raw toggles. Same scenario on our pre-layout TT-top netlist for the difference. Power by cell class: clock buffers, clock gates, flops, repair buffers, hold buffers, logic | C-PWR-1/2 (`layout_power_uw`, `layout_power_idle_uw`) | C-PWR-1/2 | exists (`layout` step) |
 | T-FAN-1 | **Buffer trees and slews per RTL signal** on the routed netlist: every data net with a real driver expanded through the buffers below it (true fanout, buffers, depth, buffer area, cell types), named by the RTL nets upstream of anonymous drivers; worst slew per tree at ss and tt with routed parasitics vs the sign-off max transition; clock tree summary (free-running vs gated buffers, nested gates). `reports/latest/layout_fanout.md` | report; slew violations WARN | C-PWR, C-AREA | exists (`layout` step) |
-| T-SO-1 | TT GDS action: utilisation, setup/hold after CTS, precheck/DRC/LVS/antenna | C-TIM-2/3, C-AREA-3/5 | | new (after push) |
+| T-SO-1 | TT GDS action: utilisation, setup/hold after CTS, precheck/DRC/LVS/antenna | C-TIM-2/3, C-AREA-3/5 | | exists, pass: e13 gds run 37865677796 (gds, gl_test, precheck); utilisation 0.69, setup +118.5 ns, hold +0.187 ns |
 | T-INF-1 | CI: GitHub `test` (TT) and `ci` (model, RTL) workflows green | green | extended (`model.yml`: TT top + core T-IF); not pushed yet |
-| T-INF-2 | Source-list consistency: `info.yaml`, `test/Makefile`, `LOSSY_SRC` list the same files | identical sets | C-RTL-3 | new |
+| T-INF-2 | Source-list consistency: `info.yaml`, `test/Makefile`, `LOSSY_SRC` list the same files | identical sets | C-RTL-4 | new |
 
 ### 4.4 Power and area measurement method
 

@@ -32,7 +32,7 @@ and peripherals (e.g. the input generator in section 4.4).
   only spike modes get there, which is consistent with the patent sending raw/lossy data for
   a few channels only (section 3).
 
-**Unverified number in this repo:** README.md and `model/nlc/energy.py` use ~10 nJ/bit for the
+**Unverified number in this repo:** `model/nlc/energy.py` uses ~10 nJ/bit for the
 radio. No source found. It is also inconsistent with [3]: 1 Mbps x 10 nJ/bit = 10 mW, the
 entire budget for compression *and* radio. Treat it as an assumption until sourced.
 
@@ -141,7 +141,8 @@ patent's 4-8 broadband channels.
   (8 + 2 input pins, 66 MHz input limit), but the RP2040 host cannot sustain real recordings
   at that rate for long (derived: its 264 KB of RAM holds 27-43 ms of a 4.94 MS/s stream at
   2 or 1.25 bytes per sample).
-- Approach agreed for the TT build: **generate the 256-slot stream on chip** (peripheral, not
+- Approach agreed for the TT build (**not built yet**: no generator in `src/`, T-GEN-1/2 open):
+  **generate the 256-slot stream on chip** (peripheral, not
   part of the compressor), so the compressor sees the real interface (256 slots, slot-rate
   timing, frame marker) at full speed:
   - counter / ramp: deterministic, trivially checkable against the golden model;

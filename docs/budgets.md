@@ -34,6 +34,10 @@ hold at the fast corner (-40 C, 1.95 V).
 
 ## Expected values (baseline, 2026-10-07)
 
+Historical: the baseline the flow compares against (`budgets.json`), measured before clock
+gating. Current values for the signed-off design (e13: 60.1k um^2 lossy core, 34.8 / 9.5 uW
+routed) are in [results.md](results.md) "Budgets (e13)" and the README.
+
 | metric | value | status |
 |---|---|---|
 | lint errors | 0 (46 `-Wall` warnings in the rest of the TT design, none fatal) | PASS |

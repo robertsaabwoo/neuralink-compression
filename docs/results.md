@@ -1,23 +1,23 @@
 # Results: measurements and findings
 
-Numbers behind the summary in the [README](../README.md). Pre-layout, sky130_fd_sc_hd, typical
-corner, 5 MHz, 8 channels unless stated. Raw per-run output: `reports/latest/` (`summary.md`,
-`metrics.json`) and one JSON per `test/core` test in `test/results/core/`. Last updated 2026-10-07.
+Numbers behind the summary in the [README](../README.md). sky130_fd_sc_hd, typical corner, 5 MHz,
+8 channels unless stated; pre-layout unless marked routed (T-PWR-3, F17-F20). Raw per-run output:
+`reports/latest/` (`summary.md`, `metrics.json`, not committed) and one JSON per `test/core` test
+in `test/results/core/`. Design on this branch: `921e1e0` (e13), signed off in gds run
+37865677796. Last updated 2026-10-10.
 
 ## Findings (input to the design phase)
 
-F2-F4 are fixed (2026-10-08): D5-D7 are implemented and their tests pass (T-OVF-1/2, T-IF-3b, T-ROB-2/3/4); `KNOWN_FAIL` is empty.
-
-The tests that expose F2-F4 stay as written and fail on today's RTL. `scripts/flow/flow.py`
-lists them in `KNOWN_FAIL`, so they are reported without failing the run.
+F2-F4 are fixed (2026-10-08, `a9c2329`): D5-D7 are implemented and their tests pass (T-OVF-1/2,
+T-IF-3b, T-ROB-2/3/4); `KNOWN_FAIL` is empty. The rows below keep the original finding text.
 
 | # | finding | test | constraint |
 |---|---|---|---|
-| F1 | **Processing latency is 2.0 ms, not ~310 us.** A sample is fully coded only when the last symbol that depends on it is coded. Through the lifting updates and the delta-coded a3, a sample early in a 64-frame block reaches a symbol 36 frames later. Time in the queue alone is 307 us | T-IF-1 | C-LAT-1 (definition open) |
+| F1 | **Processing latency is 2.0 ms, not ~310 us (1,846 us since F13).** A sample is fully coded only when the last symbol that depends on it is coded. Through the lifting updates and the delta-coded a3, a sample early in a 64-frame block reaches a symbol 36 frames later. Time in the queue alone is 307 us | T-IF-1 | C-LAT-1 (definition open) |
 | F2 | **Disable mid-packet leaves an unterminated packet at the host.** The host already has the header and first bytes; the next run's packet 0 is appended (668 = 15 + 653 bytes). Clearing the FIFO would not help: the pins need an abort signal | T-IF-3b, T-ROB-2, T-ROB-3 | C-IF-6/7 |
 | F3 | **A host stall corrupts that packet and every later one, with no recovery.** The core `overflow` pin stays 0. A 300-clock stall during the flush is absorbed | T-OVF-1/2/3 | C-OVF-1..3 (D3) |
 | F4 | **One short frame misaligns the channels for good.** Long frames and a missing `s_frame` recover | T-ROB-4 | C-IF-8 |
-| F5 | **Worst-case host speed: one byte every 4 clocks (0.8 us)** since the eager drain (was 11): worst-case frames carry up to 101 bytes (was 45). LFSR average 21.4 bits/sample (3.36 Mbit/s) unchanged; real data is smoother than before (peak 30 bytes/frame, was 40). Accepted 2026-10-08 (C-BW-3) | T-BW-1/2 | C-BW-2/3 |
+| F5 | **Worst-case host speed: one byte every 4 clocks (0.8 us)** since the eager drain (was 11): worst-case frames carry up to 101 bytes (was 45). LFSR average 21.4 bits/sample (3.36 Mbit/s) unchanged; real data is smoother than before (peak 30 bytes/frame, was 40). Accepted 2026-10-08 (C-BW-3). Measured on LFSR data, not a proof: a max-plus bound of issuer, coder and FIFO with every symbol at its 4-byte worst case (`scripts/proofs/output_bound.py`, not yet committed) gives -456 clocks of slack at 4 clocks/byte and +30 at 2 clocks/byte (256-clock frames, FIFO 8), so adversarial data with a 4-clock host can abort a packet (detected and recovered, D6) | T-BW-1/2 | C-BW-2/3 |
 | F6 | Random power-up contents in all 234 no-reset registers: identical output | T-ROB-5 | C-FN-6 |
 | F7 | Power was 98% flip-flop clock pins (618 of 629 uW, also when idle). Fixed by clock gating (F11) | T-PWR-1 | C-PWR-1/2 |
 | F8 | Critical path 61.9 ns at ss: fine at 200 ns, fails TT's old 20 ns default | T-STA-1 | C-TIM-1 |
@@ -31,18 +31,26 @@ lists them in `KNOWN_FAIL`, so they are reported without failing the run.
 | F10 | **The coder pipeline was 547 of the 2,681 flops for nothing.** The coder sees at most 8 symbols per 256 clocks. With the 10-step divider combinational (`DIV_REG` = 0), there are 2,134 flops, 110 ns slack at ss / 200 ns, and a deepest path of 121 cells (< 200 for TT's unit-delay gate sim). Output bytes are identical. The other ~1,950 flops are per-channel state, which re-timing can't remove | sweep below | C-TIM-1/4 |
 | F17 | **The routed chip draws 80 uW running and 51 uW idle (T-PWR-3), not ~12-17 uW: the clock tree CTS built is 48 / 39 uW of it.** The pre-layout netlist of the same TT top on the same real-data scenario: 16.8 / 6.0 uW. Run `a9c2329`. The always-running trunk is 36 `clkbuf_16`, 14 deep, ~1.1-1.5 uW each, mostly `delaybuf_*_clk`. CTS pads the ungated branch to match the insertion delay of the gated branches. That branch is the 18 TT pin input flops of `project.v` (`uio_q`, `strobe_q`, `ack_q`, `cfg_*`, `s_data`, `s_frame`) plus 8 top-level clock gates. Below the 143 gates, 535 more clock buffers (almost all `clkbuf_16`) serve a median of 11 flops per gate (~8 uW running). Clock buffers are 14.0k um^2 (12% of cell area). Levers (design phase, ask first): CTS buffer list / skew target in the TT config, fewer and larger gate groups, keep ungated flops next to the clock root. Repair buffers 5.0 uW, hold buffers 2.4 uW | T-PWR-3 | C-PWR-1/2 |
 | F18 | **High-fanout selects: the resizer buffers them with `clkdlybuf4s25_1` delay cells, so edges reach 2.3 ns at ss (1.46 at tt) against 0.75 ns.** 905 tree buffers on 432 nets, 8.7k um^2, of which most are `clkdlybuf4s25_1`. Largest: the decoded channel select from `core.smp_ch[1:0]` (4 nets, 98-128 sinks, 13-17 buffers, 4-6 deep) and `core.smp_ch[2]` (103), `rst_n` (105), the lossy round-robin decode from `u_lossy.rr` / `rr_iss` (58-69 each), `u_lossy.clr_n` (63), `u_rans.f_ch` (49). The slowest edges are on `smp_ch[0]` / `smp_ch[1]` themselves (26 sinks behind 3 delay cells each). 3,283 pins over the limit at ss and 366 at tt, the same counts as LibreLane: not a precheck failure, but slow edges cost short-circuit power. Full table: `reports/latest/layout_fanout.md` | T-FAN-1 | C-PWR, C-AREA |
+| F19 | **What makes the CTS delay buffers: OpenROAD's latency balancer evens out clock arrival over all flops under `clk`, padding the shallow branches.** OpenROAD treats a `dlclkp` as a sink with insertion delay (like a macro). `LatencyBalancer` (log `CTS-0033 Balancing latency`, `CTS-0036 inserted N delay buffers`) then adds delay buffers where a branch with few gate levels splits off from deeper gated branches. In a9c2329 all 56 sat on the six nets that drive both gates and flops: `clk` (the 18 TT pin flops of `project.v` + 8 gates: 29, the always-on 39 uW trunk), `u_lossy.clk_l` (one flop, `skip`: 18), `clk_s` (3), `u_rans.clk_c` (3), FIFO clock (2), `u_sel.gclk_h` (1). Moving the pin flops behind an always-on gate (`rtl-pins`) leaves `clk` with gates only, yet 28 delay buffers stay on its trunk: the pin branch is still one gate level against the core's 2-4, so the balancer is global, not per mixed net. Preview, small buffers + hold margin 0.3: 41.2/21.2 -> 37.0/17.2 uW (running/idle), trunk 52 -> 31 buffers. Doing it on all six nets (`rtl-all`, 16.5 uW idle) produced X on `m_valid` in the routed unit-delay simulation (STA hold met at all corners), so it was dropped. Settings tried with no effect: `CTS_DELAY_BUFFER_DERATE_PCT` 0 (applies to hard macros, not this balancer), `CTS_SINK_CLUSTERING_SIZE` 24, a delay cell (`clkdlybuf4s50_1`) in `CTS_CLK_BUFFERS` (it pads with `clkbuf_2` only). The pass is off only with `clock_tree_synthesis -no_insertion_delay`, which LibreLane 3.0.14's `cts.tcl` cannot pass | T-PWR-3 (cts_preview), CTS log, OpenROAD src/cts | C-PWR-1/2 |
+| F20 | **Clock tree and TT-pin power after layout: 80.0/51.4 -> 34.8/9.5 uW (running/idle), core 0.80 uW idle.** All rows routed, real data (T-PWR-3), signed off (gds, gl_test, precheck), bit-exact; core share from the T-PWR-3 split (core / TT pin glue / shared clock trunk). a9c2329 80.0/51.4 (core 28.5/1.98); `cts-a-hold` (CTS root `clkbuf_2`, tree `clkbuf_4/2/1`, `PL_RESIZER_HOLD_SLACK_MARGIN` 0.3) 47.7/25.3 (22.6/1.61); `rtl-pins` (pin registers behind an always-on gate) 41.9/19.5 (22.6/1.84); `noid` (latency balancer off: patched LibreLane image, not TT-standard; 0 delay buffers, trunk 3 buffers) 36.4/14.3 (22.2/1.78); E1 (pin data registers load only on strobes of selected slots, `s_want` from the slot selector) 32.9/10.9 (21.2/1.49); E3 (one gate in front of the whole core) 38.1/13.5 (24.8/1.78): on its own not worth it; **E1+E3 34.8/9.5 (23.8/0.80)**, hold +0.187 ns. Pre-layout T-PWR-2 `nlc_core`: 12.5/1.07. `tt-best` = the E1+E3 RTL with TT's standard flow (balancer on). Not useful: `CTS_BALANCE_LEVELS` (no change), three-deep pin gates (more padding), a one-hot channel select (same sink count as the 8:1 read muxes) | T-PWR-3, cts_preview | C-PWR-1/2 |
+| F21 | **What did not lower power (2026-10-09), all bit-exact:** coder divider pipelined (`DIV_REG` one stage +22%, two stages +51% lossy-core power; glitches are only ~4%); non-restoring divider (+1% power, +2% coder area: the per-bit add/subtract XORs cost as much as the restore multiplexers); slot selector countdown (`sA`, +0.1/+0.4 uW running/idle), Gray-coded counter (`sC`, no change), 2D counter with gated high half (`sB`, fails the routed unit-delay simulation): the slot counter's clock is only 0.71 uW. Pin control flops on a change-detect gate (`e13c`) and placement density 75 also fail the routed unit-delay simulation: **every such failure was a race of the unit-delay gate model on skewed gated-clock trees** (a lost row write in the encoder, an ack popping the FIFO twice), not a logic error (STA hold met at all corners; RTL bit-exact). TT's gl_test uses the same model, so these designs would fail it; an SDF (real-delay) gate-level simulation is the open fix. **What did:** smaller rANS renormalisation units cost no compression (held-out real data, round trip exact): bytes (today, 10 divider steps) 2.0245 bits/sample, nibbles 6 steps -0.32%, 2 bits 4 steps -0.46%, single bits 3 steps -0.50% (smaller end-of-packet flush); a format change (model, decoder, golden vectors), not done yet | DIV_REG sweep, previews, renorm sweep | C-PWR-1, C-ALG |
 
-## Budgets
+## Budgets (e13)
+
+Routed rows: T-PWR-3 / LibreLane on gds run 37865677796. Pre-layout rows: local check flow
+(`reports/20261009-015146`); the lossy core RTL is the same as `a9c2329`.
 
 | metric | value | limit / target | status |
 |---|---|---|---|
-| lossy core area | 62,200 um^2 (1,671 flops + 127 clock gates) | 173,000 / 86,600 | PASS |
-| TT design utilisation (8x2) | 48% | 70% / 60% | PASS |
-| setup slack, ss, 200 ns | +138 ns | >= 0 / 60 | PASS |
-| power, real data | lossy core 9.3 uW (was 628.6); `nlc_core` 15.9 uW | 40 / 16 | PASS |
-| power, idle | lossy core 0.77 uW (was 617.8); `nlc_core` 2.5 uW | 10 / 2 | PASS / WARN |
-| processing latency | 2.0 ms | 1 / 0.41 ms | FAIL (F1) |
-| delivery latency | 13.4 ms | 40 / 20 ms | PASS |
+| lossy core area (synth) | 60,050 um^2 (1,582 flops + 127 clock gates); TT top ~68,200 | 173,000 / 86,600 | PASS |
+| routed utilisation (4x2) | 0.69 (102,600 um^2 std cells in a 149,200 um^2 core) | 0.85 / 0.60 | WARN |
+| setup slack, ss, 200 ns, routed | +118.5 ns | >= 0 / 60 | PASS |
+| hold slack, ff, routed | +0.187 ns | >= 0 | PASS |
+| power, real data, routed (whole TT design) | 34.8 uW (core share 23.8); patched CTS image, F20 | 40 / 16 | PASS limit, over target |
+| power, idle, routed | 9.49 uW (core share 0.80) | 10 / 2 | PASS limit, over target |
+| power, pre-layout | lossy core 8.3 uW op / 0.16 idle; `nlc_core` 12.5 / 1.07 | 40 / 16 | PASS |
+| processing latency | 1,846 us | 1 / 0.41 ms | FAIL (F1) |
+| delivery latency | 13.1 ms | 40 / 20 ms | PASS |
 | bits/sample, 160 held-out files | 2.087 | 2.2 / 2.1 | PASS |
 | median SNR | 18.0 dB (10th pct 13.3) | 17 / 18 dB | PASS |
 
@@ -50,14 +58,18 @@ lists them in `KNOWN_FAIL`, so they are reported without failing the run.
 
 | suite | result |
 |---|---|
-| model (pytest, incl. change guard) | 76 pass |
-| `test/core` (47 cases, ~25 min) | F2-F4 cases fail as intended; T-ROB-4 long/missing and T-ROB-7 (reset, 3 points) pass |
-| `test/lossy` (incl. power scenarios) | 7 pass |
-| `test/rans` | 6 pass |
-| TT top through the pins, 200 ns | lossy pass; modes 0/2/3 skipped (D1); replay 7/7 |
-| gate level: lossy core, TT top netlist | pass, pass |
+| model (pytest, incl. change guard) | pass (CI `ci` run 37865677725 on e13) |
+| `test/core` (48 cases) | 48/48 at `a9c2329` (D5-D7, 2026-10-08). On e13 (pin and clock-gate changes only) CI re-ran T-IF-*; the full suite was not re-recorded |
+| `test/lossy`, `test/rans`, TT top + replay | pass (CI `ci` run 37865677725) |
+| TT `test` / `gl_test` (unit-delay gate level of the routed netlist) | pass (runs 37865677654 / 37865677796) |
+| routed netlist on real data (T-PWR-3) | bit-exact, 2 packets |
+| SDF gate level (T-GL-3) | not done |
 
 ## Data
+
+The bandwidth, host and latency rows below were measured before the eager FIFO drain (F13);
+the current values are in F5 (host: 4 clocks/byte on LFSR data, up to 101 bytes/frame) and F1/F13
+(processing latency 1,846 us).
 
 **Bandwidth, real data** (T-IF-1, 4 packets): packets 670, 650, 637, 653 bytes; 2.55 bits/sample
 on this excerpt, SNR 17.6 dB; out FIFO peak 1; flush 27 bytes in 55 clocks.
