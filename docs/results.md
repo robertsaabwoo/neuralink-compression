@@ -42,6 +42,28 @@ definition) is resolved (C-LAT-1 restated 2026-10-10). Open: F27 (OpenROAD CTS b
 | F26 | **Pin CDC and test access (a0966c0): synth 47.5k (stack) -> 48.5k um^2, ~+2.3 uW idle.** 2-flop reset synchroniser (recovery slack 160.5 ns from the pin, 196.6 ns from the synchroniser), 2-flop synchronisers on `s_strobe` / `cfg_en`, sample bus loaded by a gate whose enable comes from flops only, registered outputs (+1 clock latency), sticky overflow on `uio[4]`, config readback on `uo_out` (~630 um^2 of the total). The idle cost is the always-clocked pin flops (preview, synthetic data) | synth, STA, `cts_preview` | C-IF-11/12, C-PWR-2 |
 | F27 | **OpenROAD CTS left one clock gate without CLK on the final RTL; placement density 64 avoids it.** CTS reports 101 sinks on the gated clock `core.u_enc.u_lossy.clk_i` and finishes with 100; the missing sink is a `g_ch[7]` `dlclkp` (`u_qa`, `u_o1`, `u_o3` or `u_dp2` depending on placement) whose CLK pin is unconnected in CTS's own output netlist. Failing: the final RTL at 2x2 and at 3x2 with `PL_TARGET_DENSITY_PCT` 60 (also with `CTS_SINK_CLUSTERING_ENABLE` false, and with timing- or routability-driven placement off), and the stack at 4x2. Placement sweep (nightly 38059238643): density 56, 64, 68, 72 and 76 keep all 126 clock gates connected; 64 chosen (post-CTS hold +0.251 ns, the best of the clean variants). The flow is deterministic for a given placement, so a clean preview means a clean sign-off CTS. Root cause in OpenROAD not found; the layout gate-level test and LibreLane's DisconnectedPins check catch it, so it cannot reach silicon unnoticed | `cts_preview`, nightly sweep, CTS log, post-CTS netlist | C-FN-5, C-AREA-5 |
 
+## Future work: lower supply voltage (noted 2026-10-09; not for this submission)
+
+Decided 2026-10-10 (D10): this submission is a digital TT design at 1.8 V; the analog-slot
+route below stays a roadmap item only.
+
+Measured on the routed E1+E3 design (real data, sky130 ss -40C libraries, same activity):
+1.76 V 32.6 uW, 1.60 V 26.4 uW, **1.40 V 18.9 uW (-42%, still meets 5 MHz at the slow corner,
++31 ns slack)**, 1.28 V 15.0 uW (fails 5 MHz). The timing slack of the 8-of-256 schedule is
+worth most as voltage.
+
+On TT the only route is a bench-supplied core on the analog rail, as in Matt Venn's
+[adjustable supply digital counter](https://github.com/mattvenn/adjustable-psu-digital-counter)
+(TTCAD25a: a digital macro on VAPWR, the board's analog supply fed from a variable PSU). An
+on-chip LDO does not pay: published TT LDOs draw 19-74 uA quiescent (34-133 uW), more than this
+chip. Preconditions for a future iteration:
+1. Area: fit an analog 2x2 slot (~334 x 225 um): ~45-50k um^2 of cells (the final candidate is
+   48.5k um^2 synthesised, but 8 channels did not route in a 2x2, F23).
+2. Interface: level shifters on the 1.8 V pin signals, or an interface that fits the 6 analog
+   pins (< 500 ohm, 4 mA each).
+3. Flow: harden the core as a macro on VAPWR and place it in the analog template by hand
+   (TT's flow builds one power domain); VAPWR is the chip's shared analog rail, set on the board.
+
 ## Budgets
 
 Final candidate = branch `area4-final-3x2` (RTL a0966c0, 3x2 tiles) unless stated.

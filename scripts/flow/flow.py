@@ -167,13 +167,24 @@ def step_lint(r: Run) -> None:
     r.info["lint_warnings_top"] = len(re.findall(r"^%Warning-", t2, re.M))
 
 
+def _build_dir(r: Run, cwd: Path, tag: str) -> Path:
+    """A build folder of its own for every run and suite (passed as SIM_BUILD= on the make
+    line, which overrides the Makefiles): runs that share the working tree, e.g. two
+    check.py runs at once, no longer delete each other's simulator builds."""
+    d = cwd / "sim_build" / f"run-{r.out.name}-{tag}"
+    shutil.rmtree(d, ignore_errors=True)
+    return d
+
+
 def _cocotb(r: Run, cwd: Path, log: str, make_args: str = "") -> list[tuple[str, bool]]:
-    shutil.rmtree(cwd / "sim_build", ignore_errors=True)
-    (cwd / "results.xml").unlink(missing_ok=True)
-    r.sh(f"make {make_args}", log, cwd=cwd)
-    res = junit(cwd / "results.xml")
+    bdir = _build_dir(r, cwd, Path(log).stem)
+    xml = bdir / "results.xml"
+    r.sh(f"make {make_args} SIM_BUILD={bdir.as_posix()} COCOTB_RESULTS_FILE={xml.as_posix()}",
+         log, cwd=cwd)
+    res = junit(xml)
     if not res:
         r.failed_tests.append(f"{log}: no results (build error?)")
+    shutil.rmtree(bdir, ignore_errors=True)
     return res
 
 
@@ -203,13 +214,15 @@ def cocotb_jobs(r: Run, cwd: Path, tag: str, build: str,
                 jobs: list[tuple[str, str, str]]) -> dict[str, list[tuple[str, bool]]]:
     """Build <cwd> once with make args `build`, then run jobs (name, filter regex, extra
     make args) in parallel. Logs: <tag>_build.log and <tag>/<name>.log in the report."""
-    shutil.rmtree(cwd / "sim_build", ignore_errors=True)
+    bdir = _build_dir(r, cwd, tag)
+    build = f"{build} SIM_BUILD={bdir.as_posix()}"
     logs = r.out / tag
     logs.mkdir(exist_ok=True)
-    tmp = cwd / "sim_build" / "results"
+    tmp = bdir / "results"
     code, _ = r.sh(f"make {build} COCOTB_TEST_FILTER=__build_only__ "
-                   f"COCOTB_RESULTS_FILE={cwd / 'sim_build' / 'build.xml'}", f"{tag}_build.log", cwd=cwd)
-    vvps = [p.relative_to(cwd) for p in (cwd / "sim_build").rglob("sim.vvp")]
+                   f"COCOTB_RESULTS_FILE={(bdir / 'build.xml').as_posix()}", f"{tag}_build.log",
+                   cwd=cwd)
+    vvps = [p.relative_to(cwd) for p in bdir.rglob("sim.vvp")]
     if not vvps:
         r.failed_tests.append(f"{tag}: build failed (see {tag}_build.log)")
         return {}
@@ -225,6 +238,8 @@ def cocotb_jobs(r: Run, cwd: Path, tag: str, build: str,
 
     def run(job):
         name, filt, extra = job
+        if "PLUSARGS" not in extra:     # parallel jobs would all write tb.fst in one folder
+            extra = f"{extra} PLUSARGS=+nowaves"
         safe = re.sub(r"[^\w.=-]+", "_", name)
         xml = tmp / f"{safe}.xml"
         t0 = time.time()
@@ -240,6 +255,7 @@ def cocotb_jobs(r: Run, cwd: Path, tag: str, build: str,
             if not res:
                 r.failed_tests.append(f"{tag} {name}: no results (see {tag}/)")
     dur_file.write_text(json.dumps(durations, indent=1, sort_keys=True))
+    shutil.rmtree(bdir, ignore_errors=True)
     return out
 
 
@@ -519,7 +535,6 @@ def step_gl(r: Run) -> None:
     def gl_top():
         if not top_net.exists():
             return None
-        shutil.rmtree(ROOT / "test/sim_build/gl_local", ignore_errors=True)
         return _cocotb(r, ROOT / "test", "gl_top.log",
                        f"GATES=local NETLIST={top_net} CLK_NS={OP['clock_period_ns']} "
                        "COCOTB_TEST_FILTER='test_lossy$'")
@@ -689,7 +704,10 @@ def step_power(r: Run, quick: bool = False) -> None:
 GDS = ROOT / "data" / "gds"
 PHYS_LINE = re.compile(r"^\s*sky130_fd_sc_hd__(fill|decap|tapvpwrvgnd)_\d+\s+\S+\s*\(\);\s*$", re.M)
 # T-PWR-3 scenarios (test/test_power.py), VCD start in frames of 256 clocks
-LAYOUT_SCENARIOS = {"op": ("t_pwr3_op", 64), "idle": ("t_pwr3_idle", 0)}
+LAYOUT_SCENARIOS = {"op": ("t_pwr3_op", 64), "idle": ("t_pwr3_idle", 0),
+                    # unselected slots carry 0: the chip without the cost of emulating the
+                    # ADC mux over the pins (reported, not budgeted)
+                    "op_quiet": ("t_pwr3_op_quiet", 64), "idle_quiet": ("t_pwr3_idle_quiet", 0)}
 POWER_VECTORS = ("python scripts/gen_vectors.py --out test/vectors --name power --source real "
                  "--n-slots 128 --frames 512 --slots 1 20 21 45 64 100 126 127")
 SLEW_TCL = """{design}
@@ -746,7 +764,10 @@ def _design_tcl(d: Path, lib: Path, net: Path, top: str) -> str:
     (fetch_gds.py) estimates them from placement in OpenROAD (`NLC_STA` must be openroad), on
     the routing layers LibreLane uses for sky130 (RT_MIN/MAX_LAYER met1-met4)."""
     if (d / "nom.spef").exists():
-        return (f"read_liberty {lib}\nread_verilog {net}\nlink_design {top}\n"
+        # OpenROAD (CI) will not link a netlist without a technology: read the LEFs first
+        lef = (f"read_lef {PDK / 'techlef/sky130_fd_sc_hd__nom.tlef'}\n"
+               f"read_lef {PDK / 'lef/sky130_fd_sc_hd.lef'}\n") if "openroad" in STA else ""
+        return (f"{lef}read_liberty {lib}\nread_verilog {net}\nlink_design {top}\n"
                 f"read_sdc {d / 'signoff.sdc'}\nread_spef {d / 'nom.spef'}")
     return (f"read_db {d / 'design.odb'}\nread_liberty {lib}\nread_sdc {d / 'signoff.sdc'}\n"
             "set_wire_rc -signal -layers {met1 met2 met3 met4}\n"
@@ -833,6 +854,13 @@ def step_layout(r: Run, quick: bool = False) -> None:
     net.write_text(PHYS_LINE.sub("", (d / "nl.v").read_text()))
     lib = NL.read_lib(LIB["tt"])
     nl = NL.read_netlist(net, lib)
+    # OpenROAD CTS (LibreLane 3.0.14) sometimes drops a clock gate's CLK pin, depending on
+    # placement: its registers are never written and the routed sim stalls after a few bytes
+    lost = [c.inst for c in nl.cells.values()
+            if NL.cell_class(nl, c) == "clock_gate" and not c.ins.get("CLK")]
+    if lost:
+        r.failed_tests.append(f"layout: {len(lost)} clock gate(s) lost their CLK pin in CTS "
+                              f"(OpenROAD bug, placement dependent): {', '.join(lost[:4])}")
 
     # --- structure: LibreLane's own numbers, clock tree, buffer trees ---------------------
     ll = json.loads((d / "metrics.json").read_text())
@@ -888,6 +916,8 @@ def step_layout(r: Run, quick: bool = False) -> None:
     clock_pins = {f"{c.inst}/{p}" for c in nl.cells.values()
                   for p, n in (c.ins | c.outs).items() if n in nl.clock_nets}
     for c, s in slews.items():
+        if not s:       # the STA run failed (e.g. ORD-2010): no slews is not "no violations"
+            r.failed_tests.append(f"layout STA {c}: no slews reported (see layout_sta_{c}.log)")
         ck = [v for p, v in s.items() if p in clock_pins]
         r.metrics[f"layout_slew_violations_{c}"] = sum(v > limit for v in s.values())
         r.info[f"layout_max_slew_{c}_ns"] = round(max(s.values()), 3) if s else None
@@ -962,6 +992,9 @@ def step_layout(r: Run, quick: bool = False) -> None:
                 r.failed_tests.append(f"power {tag} {name}: {lost} activity annotations not "
                                       f"applied (see power_{tag}_{name}.log)")
             groups = _power(text)
+            if "Total" not in groups:      # engine error: 0 uW would pass every power budget
+                r.failed_tests.append(f"power {tag} {name}: no report_power output "
+                                      f"(see power_{tag}_{name}.log)")
             by_class: dict[str, float] = {}
             inst_power[f"{tag}_{name}"] = _instance_power(text)
             for inst, p in inst_power[f"{tag}_{name}"].items():
@@ -999,6 +1032,24 @@ def step_layout(r: Run, quick: bool = False) -> None:
         root_rows.append(row)
     root_rows.sort(key=lambda x: -(x.get("op_uw") or 0))
     r.info["layout_clock_roots_top"] = root_rows[:5]
+
+    # --- core vs TT pin interface: the core is what an implant would carry; the pin glue
+    # (input registers of project.v) exists only for TT. The free-running clock root is
+    # shared and reported on its own. Attribution by named nets (the netlist is flat).
+    blocks = NL.cell_blocks(nl, roots, NL.core_inputs(ROOT / "src" / "nlc_core.v"))
+    by_block: dict[str, dict[str, float]] = {}
+    for name in names:
+        ip = inst_power.get(f"layout_{name}", {})
+        if ip:
+            agg: dict[str, float] = {}
+            for inst, pw in ip.items():
+                k = blocks.get(inst, "other")
+                agg[k] = agg.get(k, 0.0) + pw
+            by_block[name] = {k: round(v, 3) for k, v in sorted(agg.items())}
+    r.info["layout_power_by_block_uw"] = by_block
+    for name, metric in [("op", "layout_core_power_uw"), ("idle", "layout_core_power_idle_uw")]:
+        if name in by_block:
+            r.metrics[metric] = by_block[name].get("core", 0.0)
     rcols = ["root", "enable", "flops", "child_gates", "buffers", "depth", "delay_buffers",
              "dummy_loads", "buffer_area_um2", "buffer_types"] + [f"{n}_uw" for n in names]
     md += ["## Clock roots (port and every clock gate), by running power", "",

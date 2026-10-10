@@ -14,7 +14,7 @@ module tb ();
       #(vcd_start);
       $dumpfile(vcd_file);
       $dumpvars(1, user_project);
-    end else begin
+    end else if (!$test$plusargs("nowaves")) begin   // parallel runs share the folder
       $dumpfile("tb.fst");
       $dumpvars(0, tb);
       #1;

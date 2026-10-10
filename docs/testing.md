@@ -25,6 +25,26 @@ Quick view of everything from a terminal: `python scripts/status.py`.
 `check.py` runs inside the `nlc-flow` image (build once: `python docker/fetch_inputs.py && docker build -t nlc-flow docker`).
 Results: `reports/latest/summary.md`, `reports/latest/metrics.json`, logs and netlists next to them.
 
+### 1.1 Experiments on GitHub Actions (no local CPU)
+
+| what | how | time |
+|---|---|---|
+| CTS preview of a design variant | push a branch: `.github/workflows/cts_preview.yaml` runs LibreLane up to post-CTS repair, then the layout step with wire parasitics estimated from placement; job summary + artifacts `cts_preview` (`python scripts/fetch_gds.py --preview --run <id>`) and `cts_preview_report` | ~5 min |
+| Full sign-off of a variant | the same push runs TT's `gds` workflow (cancel it for throwaway experiments: `gh run cancel <id>`) | ~45-80 min |
+| Nightly sweep | edit `sweeps/nightly.json` on branch `nightly` and push: `.github/workflows/nightly.yaml` runs every entry (design from `ref`, LibreLane config overrides, `noid` = patched image without CTS latency balancing, full or preview flow) through LibreLane + the layout step, plus long test/core regressions; the `aggregate` job summary / artifact `nightly-table` holds one table (`scripts/ci/nightly_aggregate.py`) | ~3 h for ~20 full runs |
+| Compare reports | `python scripts/ci/compare_reports.py a=<report dir> b=<report dir>` | s |
+
+CI power is on synthetic data (the dataset is not public): it ranks variants. Re-measure winners
+locally on real data: put the routed design (`data/gds/<sha7>/` inside a nightly or gds artifact,
+or `scripts/fetch_gds.py --run <gds run id>`) under `data/gds/`, write its name to
+`data/gds/LATEST`, then `python scripts/check.py --only layout`.
+
+**Routed gate-level failures:** a routed (post-CTS) netlist that is bit-exact in RTL but fails the
+unit-delay gate-level simulation (bytes differ, X on `m_valid`) has so far always been a race of the
+unit-delay model on skewed gated-clock trees, not a logic error (docs/results.md F21). TT's
+gl_test uses the same model. Check STA hold first; the open fix is an SDF (real-delay)
+gate-level simulation (T-GL-3).
+
 ## 2. Inventory of existing tests
 
 ### 2.1 Golden model (`model/tests`, pytest, 47 tests)
