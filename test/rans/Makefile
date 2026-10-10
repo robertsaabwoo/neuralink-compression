@@ -7,7 +7,7 @@ TOPLEVEL_LANG ?= verilog
 TOP ?= static
 COMPILE_ARGS += -g2012
 SIM_BUILD = sim_build/$(TOP)
-VERILOG_SOURCES = $(CURDIR)/../../src/robs_rANS/rans_tdm_$(TOP).sv
+VERILOG_SOURCES = $(CURDIR)/ref/rans_tdm_$(TOP).sv
 TOPLEVEL = rans_tdm_$(TOP)
 COCOTB_TEST_MODULES = test_rans_$(TOP)
 

@@ -10,6 +10,7 @@ with a VCD; in RTL they are ordinary bit-exact tests):
                      gating, what toggles depends on the gate enables)
 """
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -34,6 +35,9 @@ CLK_NS = float(os.environ.get("CLK_NS", "10"))   # gate level with unit delays: 
 SPREAD = [3, 40, 41, 90, 128, 200, 254, 255]     # 8 of 256 slots, one slot per clock
 
 
+_WARNED = False
+
+
 def test_data(n_packets, n_sel=N_SEL, source="real", slots=SPREAD):
     n = n_packets * FPP + LAG_FRAMES
     if source in stimgen.PATTERNS:
@@ -42,6 +46,12 @@ def test_data(n_packets, n_sel=N_SEL, source="real", slots=SPREAD):
     if raw.exists():
         _, x = load_challenge(raw, N_SEL, first_file=300)       # not in the ROM's training set
         return x[5000:5000 + n, :n_sel]
+    global _WARNED
+    if not _WARNED:
+        _WARNED = True
+        logging.getLogger("cocotb.test_lossy").warning(
+            "*** NO REAL DATA: %s missing, 'real' tests run on SYNTHETIC data "
+            "(README.md, Data) ***", raw)
     return synthetic(n_sel, n, seed=11)
 
 

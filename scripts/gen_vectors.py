@@ -62,7 +62,8 @@ def main() -> None:
     n_raw = args.frames + fifo_profile(lossy)[1]          # real: packets + the lag frames below
     source = args.source
     if source == "real" and not (ROOT / "data" / "raw").exists():
-        print("data/raw missing (scripts/fetch_data.py): synthetic data instead")
+        print("*** WARNING: NO REAL DATA: data/raw missing (README.md, Data): "
+              "SYNTHETIC data instead ***", file=sys.stderr)
         source = "synthetic"
     x = (real(k, n_raw) if source == "real"
          else synthetic(k, args.frames, seed=args.seed, rate_hz=100.0))

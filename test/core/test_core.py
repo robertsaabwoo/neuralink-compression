@@ -57,14 +57,6 @@ def report(env: NlcEnv, extra: dict | None = None, check: bool = True) -> dict:
     return r
 
 
-def skip_known() -> None:
-    """CI (NLC_SKIP_KNOWN=1) skips tests that fail on today's RTL by design (docs/results.md).
-    A runtime skip: cocotb ignores skip=True for tests selected by COCOTB_TEST_FILTER."""
-    if os.environ.get("NLC_SKIP_KNOWN") == "1":
-        import pytest
-        pytest.skip("known failure on today's RTL (NLC_SKIP_KNOWN=1)")
-
-
 async def fresh(dut, name: str, prev: NlcEnv | None = None, **kw) -> NlcEnv:
     """New environment on a freshly reset DUT (one clock per cocotb test)."""
     if prev is not None:

@@ -1,5 +1,5 @@
 """Channel-interleaved rANS for an II=1 TDM pipeline: golden model for
-src/robs_rANS/rans_tdm_adaptive.sv and src/robs_rANS/rans_tdm_static.sv.
+test/rans/ref/rans_tdm_adaptive.sv and test/rans/ref/rans_tdm_static.sv.
 
 Shared coding core (both variants)
 ----------------------------------

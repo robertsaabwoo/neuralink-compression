@@ -7,7 +7,7 @@ lists it under "Not specified".
 
 Order of work agreed for the project: (1) understand the platform (this file),
 (2) build good testing, (3) design. RTL before step 3 is limited to testbenches
-and peripherals (e.g. the input generator in section 4.4).
+and peripherals (the on-chip input generator of section 4.4 was planned, not built).
 
 ---
 
@@ -141,15 +141,16 @@ patent's 4-8 broadband channels.
   (8 + 2 input pins, 66 MHz input limit), but the RP2040 host cannot sustain real recordings
   at that rate for long (derived: its 264 KB of RAM holds 27-43 ms of a 4.94 MS/s stream at
   2 or 1.25 bytes per sample).
-- Approach agreed for the TT build: **generate the 256-slot stream on chip** (peripheral, not
-  part of the compressor), so the compressor sees the real interface (256 slots, slot-rate
-  timing, frame marker) at full speed:
+- Planned, **not implemented** (no generator in `src/`; a future option): generate the
+  256-slot stream on chip (peripheral, not part of the compressor), so the compressor sees
+  the real interface (256 slots, slot-rate timing, frame marker) at full speed:
   - counter / ramp: deterministic, trivially checkable against the golden model;
   - LFSR noise: worst case for compression (incompressible, many escapes, maximum output
     rate) - a stress test;
   - both are deterministic, so the Python model reproduces the exact expected output.
-- Real recordings still go through the pins at a reduced rate for bit-exact checks (the
-  existing strobe protocol, `src/project.v`).
+- As built, all samples (real or synthetic) go through the pins at a reduced rate (the
+  strobe protocol, `src/project.v`: one slot per 2 clocks); the full-rate 256-slot interface
+  is exercised in simulation only (`test/core`, II = 1).
 - Output: compressed bytes on `uo_out` with `m_valid/m_last`. For 8 lossy channels at
   ~2 bit/sample: 8 x 19.3 kHz x 2 b ~ 310 kbit/s (derived), well within pin and RP2040 limits.
 
@@ -162,7 +163,8 @@ patent's 4-8 broadband channels.
 4. Latency: < 1 ms [3]; spike decision ~1 us [1]; packet windows 10-40 ms [2].
 5. Power: < 10 mW for 1024 channels incl. radio (~10 uW/channel). [3]
 6. TT build: <= 16 tiles, ~5-8 kbit storage total, 8/8/8 IO, <= ~50-66 MHz; on-chip
-   256-slot stimulus generator plus slow real-data path through pins.
+   slow sample path through pins (an on-chip 256-slot stimulus generator was planned, not
+   built: section 4.4).
 7. Test data: the challenge recordings (1 h, non-human primate motor cortex, 743 files,
    ~19.5 kHz, 10-bit codes stored as 16-bit WAV). [3], `model/nlc/data.py`
 
