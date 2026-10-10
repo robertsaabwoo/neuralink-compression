@@ -72,8 +72,7 @@ COVERAGE_BINS = ([f"esc_ctx{c}" for c in range(4)] + ["esc_consecutive", "esc_la
                  + [f"occ_{k}" for k in (1, 2, 4)]     # burst buffer after a push
                  + ["rans_hazard_stall", "back_to_back_same_channel"]
                  + [f"coder_word_bytes_{k}" for k in range(5)]
-                 + ["flush_overlaps_samples", "out_fifo_full", "host_stall_header",
-                    "host_stall_payload", "host_stall_flush"]
+                 + ["flush_overlaps_samples"]    # out_fifo_full, host_stall_*: retired (D8)
                  + [f"n_sel_{k}" for k in range(1, 9)]
                  + ["slot0_selected", "slot255_selected", "adjacent_selected", "seq_wrap"]
                  + [f"enable_drop_{p}" for p in ("midframe", "midblock", "midpacket", "flush")])
@@ -81,7 +80,7 @@ POWER_SCENARIOS = {   # name: (test in test/lossy, VCD start in frames: skip sta
     "op": ("test_power_op", 64), "op4": ("test_power_n4", 64),
     "worst": ("test_power_worst", 64), "floor": ("test_power_floor", 0),
     "idle": ("test_power_idle", 0)}
-# T-PWR-2: the whole core (config, slot selector, encoder, output FIFO) at the real interface
+# T-PWR-2: the whole core (config, slot selector, encoder) at the real interface
 CORE_POWER_SCENARIOS = {"core_op": ("t_pwr_op", 64), "core_idle": ("t_pwr_idle", 0)}
 
 BUDGETS = json.loads((HERE / "budgets.json").read_text())
@@ -307,12 +306,7 @@ def collect_core(r: Run, res_dir: Path) -> None:
         r.info["bandwidth_worst"] = {
             "test": worst["test"],
             **{k: v for k, v in worst["bandwidth"].items() if k != "packet_bytes"}}
-        r.info["out_fifo_peak"] = max(v["bandwidth"]["out_fifo_peak"] for v in clean)
         r.info["flush_bytes_max"] = max(v["bandwidth"]["flush_bytes_max"] for v in clean)
-    bw2 = runs.get("t_bw_2")
-    if bw2:
-        r.info["host_turnaround_max_clocks"] = bw2.get("host_turnaround_max_clocks")
-        r.info["host_turnaround_trials"] = bw2.get("trials")
     cov: dict[str, int] = {}
     for v in runs.values():
         for k, n in v.get("coverage", {}).items():

@@ -18,9 +18,10 @@
 // frame, channel by channel (nlc.lossy.coding_order), and lifts the sample one level
 // per issued symbol (shared lifter), so only the sample is buffered per channel: at
 // most 4 x N_SEL symbols per frame against a frame of clocks, so a burst is coded long
-// before the channel's next sample. The coder may lag by up to a frame (packet flush,
-// output back-pressure); more than a frame sets `overflow` (the channel's next sample
-// would overwrite the one not yet lifted).
+// before the channel's next sample. The coder may lag by up to a frame (packet flush);
+// more than a frame sets `overflow` (the channel's next sample would overwrite the one
+// not yet lifted). The output has no back-pressure (D8): one byte per clock while
+// m_valid, and the consumer takes every byte.
 //
 // Requirements: frames are long enough to absorb the packet flush (about
 // 3 * N_SEL * SB / 2 cycles) and a 4-symbol burst on every channel in two frames in a row
@@ -31,10 +32,11 @@
 // enable = 0 clears everything; the next packet is seq 0.
 //
 // Abort (D5/D6): when the coder falls more than a frame behind (a burst would be
-// overwritten: blocked output) or a frame was short (s_frame early), the packet in
+// overwritten; a safety net: with no back-pressure (D8) it cannot happen at the real
+// frame rate) or a frame was short (s_frame early), the packet in
 // flight is dropped: issuer, coder and serialiser are cleared, samples are ignored but
-// frames are still counted (smp_tick), and output resumes at the next packet boundary
-// at which the output can take bytes again; its header carries that packet's seq, so the
+// frames are still counted (smp_tick), and output resumes at the next packet boundary;
+// its header carries that packet's seq, so the
 // gap names the lost packets. abort_req tells the encoder to end a partly sent packet
 // with the abort token. Blocks and rANS states restart at every packet boundary, so
 // nothing else needs clearing.
@@ -56,11 +58,10 @@ module nlc_lossy #(
     input  logic             smp_tick,     // a new frame started (s_frame; not the first)
     input  logic             smp_short,    // with smp_tick: the frame that ended was short
 
-    output logic             m_valid,
-    input  logic             m_ready,
+    output logic             m_valid,      // one byte per clock, no back-pressure (D8)
     output logic [7:0]       m_data,
     output logic             m_last,
-    output logic             overflow,     // sticky: a packet was aborted (blocked output)
+    output logic             overflow,     // sticky: a packet was aborted (coder a frame behind)
     output logic             abort_req     // packet in flight dropped (one clock)
 );
   // fixed by LossyConfig: adc_bits 10, block 64, levels 3, shifts a 1 / d (3, 2, 2),
@@ -137,7 +138,7 @@ module nlc_lossy #(
   logic iss_busy;
   assign iss_busy = pending != '0;
   nlc_icg u_cg_l (.clk(clk), .en(smp_valid || smp_tick || iss_busy || c_active || abort_now ||
-                                 (m_valid && m_ready)), .gclk(clk_l));
+                                 m_valid), .gclk(clk_l));
   nlc_icg u_cg_s (.clk(clk_l), .en(smp_valid || smp_tick), .gclk(clk_s));
   nlc_icg u_cg_i (.clk(clk_l), .en(smp_valid || iss_busy || abort_now), .gclk(clk_i));
 
@@ -322,9 +323,9 @@ module nlc_lossy #(
   end
 
   // abort: the coder is more than a frame behind, or a frame was short; resume at the
-  // first packet start at which the output takes bytes again (the token is out first)
+  // next packet start (the token is out in the clock after the abort)
   assign abort_now  = clr_n && !skip && (pending > (SEL_W+2)'(n_sel) || (smp_tick && smp_short));
-  assign resume_now = skip && pkt_start && m_ready;
+  assign resume_now = skip && pkt_start;
   assign run        = !skip || resume_now;    // samples of this cycle are processed
   assign abort_req  = abort_now;
   always_ff @(posedge clk_l or negedge clr_n) begin
@@ -360,7 +361,7 @@ module nlc_lossy #(
     end
   end
 
-  always_ff @(posedge clk_i or negedge clr_n) begin // sticky: an abort for blocked output
+  always_ff @(posedge clk_i or negedge clr_n) begin // sticky: an abort, coder a frame behind
     if (!clr_n) overflow <= 1'b0;
     else if (pending > (SEL_W+2)'(n_sel)) overflow <= 1'b1;
   end
@@ -381,7 +382,8 @@ module nlc_lossy #(
 
   // ---------------------------------------------------------------------------
   // Serialiser: header byte {mode = 1, seq}, then the bytes of the coder's output
-  // word, read in place (no copy); the word is taken (c_ready) with its last byte.
+  // word, read in place (no copy), one byte per clock; the word is taken (c_ready) with
+  // its last byte, so the coder cannot overwrite it before it is out.
   // ---------------------------------------------------------------------------
   logic [1:0] bi;                         // byte of the coder's word being sent
   logic [1:0] b_last;                     // its last byte (keep is contiguous from bit 0)
@@ -393,10 +395,10 @@ module nlc_lossy #(
   assign m_valid = c_valid && !skip;
   assign m_data  = need_hdr ? {2'b01, seq} : c_data[8 * bi +: 8];
   assign m_last  = !need_hdr && w_end && c_last;
-  assign c_ready = m_ready && !need_hdr && w_end;
+  assign c_ready = !need_hdr && w_end;
 
   logic clk_o;
-  nlc_icg u_cg_o (.clk(clk_l), .en((m_valid && m_ready) || abort_now || resume_now),
+  nlc_icg u_cg_o (.clk(clk_l), .en(m_valid || abort_now || resume_now),
                   .gclk(clk_o));
 
   always_ff @(posedge clk_o or negedge clr_n) begin

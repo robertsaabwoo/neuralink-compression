@@ -1,18 +1,19 @@
 """Test environment for nlc_core: the platform around the chip (docs/testing.md 4.1).
 
 One coroutine runs every clock. On the falling edge it drives the inputs (config writes, the
-ADC mux slot, the host's m_ready); in the ReadOnly phase of the same edge it samples outputs
-and monitors. Values sampled there are what the next rising edge acts on, so a byte counts as
-taken when m_valid and m_ready are both 1 at that sample.
+ADC mux slot); in the ReadOnly phase of the same edge it samples outputs and monitors. The
+output is a valid-only stream (D8: no back-pressure), so every clock with m_valid = 1 at that
+sample is a byte taken.
 
   ADC mux    one slot per clock, n_slots per frame, s_frame on slot 0, never waits. Runs from
              reset with random filler; play() inserts data frames at the next frame boundary
              after the config queue is empty. Faults (frame_faults): ("short", n) s_frame after
              n slots, ("long", n) n slots, ("missing",) no s_frame between two frames.
   config     writes through nlc_core's cfg port, one per clock (configure(), write()).
-  host       m_ready per clock: turnaround (clocks per byte), random p_ready, stall windows.
-             Resets with the chip (rst_n drops any partial packet it holds).
-  scoreboard splits bytes on m_last; an abort token (m_abort, D6/D7) discards the partial
+  host       captures every clock with m_valid (D8: it cannot stall the output, so the former
+             turnaround / p_ready / stall knobs are gone). Resets with the chip (rst_n drops
+             any partial packet it holds).
+  scoreboard splits bytes on m_last; an abort token (m_abort, one clock, D5/D7) discards the partial
              packet. Expected packet k = LossyCodec on frames [k*fpp, (k+1)*fpp) of the frames
              actually driven since enable, selected by the frame rule of model/nlc/adc.py (D5),
              so frame faults are checked bit-exact. By seq, so lost packets are allowed when the
@@ -27,10 +28,9 @@ from __future__ import annotations
 
 import json
 import os
-import random
 import sys
 from collections import Counter, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import cocotb
@@ -136,44 +136,10 @@ def dependency_horizon(cfg: LossyConfig) -> list[int]:
 # host model
 # ---------------------------------------------------------------------------
 
-@dataclass
-class Stall:
-    """Host stops taking bytes for `clocks` clocks, starting at an absolute clock or when it is
-    about to take byte `at_byte` of the `at_packet`-th packet it receives (0-based)."""
-    clocks: int
-    at_clock: int | None = None
-    at_packet: int | None = None
-    at_byte: int = 0
-
-
-@dataclass
-class Host:
-    turnaround: int = 1          # clocks per byte: ready again `turnaround` clocks after a take
-    p_ready: float = 1.0         # otherwise ready with this probability
-    stalls: list[Stall] = field(default_factory=list)
-    seed: int = 0
-
-    def __post_init__(self) -> None:
-        self.rng = random.Random(self.seed)
-        self.next_ok = 0
-        self.stall_until = -1
-        self.stall_log: list[tuple[int, int, int]] = []   # (clock, packet, byte) of each start
-
-    def ready(self, clock: int, pkt: int, byte: int) -> bool:
-        for s in self.stalls:
-            hit = (s.at_clock == clock) if s.at_clock is not None else (
-                s.at_packet == pkt and s.at_byte == byte)
-            if hit and clock > self.stall_until:
-                self.stall_until = clock + s.clocks - 1
-                self.stall_log.append((clock, pkt, byte))
-                if s.at_clock is None:
-                    s.at_packet = None            # one shot
-        if clock <= self.stall_until or clock < self.next_ok:
-            return False
-        return self.p_ready >= 1.0 or self.rng.random() < self.p_ready
-
-    def took(self, clock: int) -> None:
-        self.next_ok = clock + self.turnaround
+# The host has no knobs: the output is a valid-only stream (decision D8), the host takes the
+# byte in every clock with m_valid = 1 and drops its partial packet on the abort token. The
+# former Host(turnaround, p_ready, stalls) model and the tests that needed it (T-BW-2, T-OVF-*,
+# the host_stall cases of T-ROB-2/7) are retired: docs/testing.md.
 
 
 # ---------------------------------------------------------------------------
@@ -323,11 +289,10 @@ def _int(sig, default: int = -1) -> int:
 
 
 class NlcEnv:
-    def __init__(self, dut, name: str, *, host: Host | None = None, n_slots: int = N_SLOTS,
+    def __init__(self, dut, name: str, *, n_slots: int = N_SLOTS,
                  clk_ns: float = CLK_NS, monitors: bool = True, allow_loss: bool = False,
                  allow_abort: bool = False, seed: int = 0) -> None:
         self.dut, self.name = dut, name
-        self.host = host or Host()
         self.n_slots, self.clk_ns = n_slots, clk_ns
         self.sb = Scoreboard(allow_loss, allow_abort)
         # abort token output (D6/D7); today's RTL has none: aborts are then invisible
@@ -349,7 +314,6 @@ class NlcEnv:
         # host side
         self.rx = bytearray()
         self.rx_first_clock = 0
-        self.stall_pos: list[tuple[int, int]] = []    # (packet, byte) where a stall started
         # monitors
         self.lossy = self.rans = None
         if monitors:
@@ -368,7 +332,7 @@ class NlcEnv:
         d = self.dut
         if clock:
             cocotb.start_soon(Clock(d.clk, self.clk_ns, unit="ns").start())
-        for s in (d.s_valid, d.s_frame, d.s_data, d.cfg_we, d.cfg_addr, d.cfg_data, d.m_ready):
+        for s in (d.s_valid, d.s_frame, d.s_data, d.cfg_we, d.cfg_addr, d.cfg_data):
             s.value = 0
         d.rst_n.value = 0
         await ClockCycles(d.clk, 1)
@@ -524,24 +488,22 @@ class NlcEnv:
             # ADC
             v, f = self._adc()
             d.s_valid.value, d.s_frame.value, d.s_data.value = 1, f, v
-            # host
-            pos = len(self.rx)
-            ready = self.host.ready(self.clock, self.sb.packets, pos)
-            d.m_ready.value = int(ready)
 
             await ReadOnly()
-            if ready and _int(d.m_valid) == 1:
-                self.host.took(self.clock)
-                if self.has_abort and _int(d.m_abort, 0):
-                    self.sb.on_abort(bytes(self.rx), self.clock)
-                    self.rx.clear()
-                else:
-                    b, last = _int(d.m_data, 0), _int(d.m_last, 0)
-                    if not self.rx:
-                        self.rx_first_clock = self.clock
-                    self.rx.append(b)
-                    if last:
-                        self._on_packet()
+            # host: takes every byte (D8); the abort token comes with m_valid = 0
+            valid = _int(d.m_valid) == 1
+            if self.has_abort and _int(d.m_abort, 0):
+                if valid:
+                    self.sb.errors.append(f"clock {self.clock}: m_valid with the abort token")
+                self.sb.on_abort(bytes(self.rx), self.clock)
+                self.rx.clear()
+            elif valid:
+                b, last = _int(d.m_data, 0), _int(d.m_last, 0)
+                if not self.rx:
+                    self.rx_first_clock = self.clock
+                self.rx.append(b)
+                if last:
+                    self._on_packet()
             if self.lossy is not None:
                 self._monitor()
             self.clock += 1
@@ -562,10 +524,6 @@ class NlcEnv:
         self.rx.clear()
         seg = self.sb.seg
         k = seg.next if seg else 0
-        for c, p, b in self.host.stall_log:
-            if p == self.sb.packets:
-                where = "header" if b == 0 else "flush" if b >= len(pkt) - FLUSH_TAIL else "payload"
-                self.mon.cov[f"host_stall_{where}"] += 1
         if self.sb.seq_log and self.sb.seq_log[-1] == 63 and pkt and pkt[0] & 63 == 0:
             self.mon.cov["seq_wrap"] += 1
         self.sb.on_packet(pkt, clk)
@@ -599,20 +557,17 @@ class NlcEnv:
         if _int(ly.overflow, 0):
             m.ly_overflow = True
         m.pending_max = max(m.pending_max, _int(ly.pending, 0))
-        if _int(d.wr_en, 0):
+        if _int(d.m_valid, 0) == 1:
             m.bytes_frame[self.adc_frame] += 1
             m.pkt_bytes += 1
             if m.flush_start is not None:
                 m.flush_bytes += 1
-            if _int(d.u_fifo.wr_last, 0):
+            if _int(d.m_last, 0):
                 m.packet_lens.append(m.pkt_bytes)
                 m.pkt_bytes = 0
                 if m.flush_start is not None:
                     m.flush.append((m.flush_bytes, self.clock - m.flush_start))
                     m.flush_start = None
-        if _int(d.fifo_full, 0):
-            m.cov["out_fifo_full"] += 1
-        m.out_peak = max(m.out_peak, _int(d.fifo_count, 0))
         if _int(d.overflow, 0):
             m.core_overflow = True
 
@@ -689,7 +644,6 @@ class NlcEnv:
             "bytes_per_frame_max": max(bpf),
             "bytes_per_frame_hist": dict(sorted(Counter(bpf).items())),
             "packet_bytes": m.packet_lens,
-            "out_fifo_peak": m.out_peak,
             "flush_bytes_max": max((b for b, _ in m.flush), default=0),
             "flush_clocks_max": max((c for _, c in m.flush), default=0),
             "pending_max": m.pending_max,
@@ -730,7 +684,6 @@ class Mon:
         self.bytes_frame: Counter = Counter()
         self.packet_lens: list[int] = []
         self.flush: list[tuple[int, int]] = []
-        self.out_peak = 0
         self.pending_max = 0
         self.core_overflow = self.ly_overflow = False
         self.history: list[str] = []
