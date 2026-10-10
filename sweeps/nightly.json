@@ -1,8 +1,8 @@
 {
-  "_doc": "2026-10-10: DFT build (integration-dft) crashed in post-GRT repair (GRT-0183 heap underflow in 3D maze routing) after GRT disabled the clock NDR to relieve local overflow. Config-only fixes: NDR on clock roots only; less routing derating.",
+  "_doc": "2026-10-10: GRT-0183 (OpenROAD maze-router heap underflow) hits the NDR root net of a per-channel clock-gate tree (clknet_0_..u_dp*.gclk), also with CTS_APPLY_NDR root_only. Try no NDR at all.",
   "sweep": [
-    {"name": "dft-ndr-root", "ref": "integration-dft", "flow": "full", "noid": true, "config": {"CTS_APPLY_NDR": "root_only"}},
-    {"name": "dft-grtadj-0.2", "ref": "integration-dft", "flow": "full", "noid": true, "config": {"GRT_ADJUSTMENT": 0.2}}
+    {"name": "dft-ndr-none", "ref": "integration-dft", "flow": "full", "noid": true, "config": {"CTS_APPLY_NDR": "none"}},
+    {"name": "dft-ndr-none-d62", "ref": "integration-dft", "flow": "full", "noid": true, "config": {"CTS_APPLY_NDR": "none", "PL_TARGET_DENSITY_PCT": 62}}
   ],
   "rtl": []
 }
