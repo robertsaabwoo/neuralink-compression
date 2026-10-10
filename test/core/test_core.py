@@ -363,10 +363,10 @@ async def t_rob_4(dut, fault):
 
 
 # Registers without reset that are not clock-gated storage (nlc_greg instances are found
-# by walking the hierarchy: every nlc_greg holds no-reset storage by design).
-NO_RESET = {
-    "u_enc.u_lossy.u_rans": ["d_rem", "d_dq", "d_f", "d_c", "d_ch", "o_last"],
-}
+# by walking the hierarchy: every nlc_greg holds no-reset storage by design). The looped
+# rANS divider (nlc_rans, DIV_K) keeps its loop register x_l in an nlc_greg and resets all
+# of its control registers, so nothing outside the gated storage is listed today.
+NO_RESET: dict[str, list[str]] = {}
 
 
 def _gated_regs(h, depth: int = 0) -> list:
