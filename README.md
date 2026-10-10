@@ -7,22 +7,25 @@ compression ratio.
 
 ## Status
 
-**Testing phase.** The RTL works and matches the Python model bit for bit. Now we are building
-the test environment and measuring the design against Neuralink-derived requirements. Design
-fixes come after that.
+**Hardening for a Tiny Tapeout submission (digital, 1.8 V, 3x2 tiles).** The RTL matches the
+Python model bit for bit. Power and area are within the limits of the Neuralink-derived budgets; the open
+item is an OpenROAD clock-tree bug on the final RTL (below).
 
 | | result | |
 |---|---|---|
 | compression | 2.09 bits/sample, 18.0 dB median SNR | pass |
-| area | 128,000 um^2, 48% of an 8x2 TT design | over the 4x2 target |
-| timing | +138 ns slack at 200 ns (slow corner) | pass |
-| power | 629 uW, 98% of it flip-flop clock pins | **far over the 40 uW budget** |
-| tests | 31 of 42 interface/robustness cases pass | 10 fail on purpose: open design issues |
+| power | 34.8 uW running, 9.5 uW idle: routed, real data, signed off on the pre-area-round RTL (e13); the 3x2 build before the test-access pins: 34.7 / 9.4 uW in a post-CTS preview on synthetic data. Was 629 uW before clock gating | under the 40 uW limit, over the 16 uW target |
+| area | 48,500 um^2 of cells (from 128,000); 3x2 tiles, ~55% utilisation | pass; 2x2 does not route at 8 channels |
+| timing | +129 ns setup slack at 200 ns (slow corner) | pass |
+| throughput | one ADC slot per clock; no input data can make it drop a packet at the real 256-clock frame (proof, +138 clocks of slack; RTL test T-BW-3: worst-case data, 6/6 pass) | pass |
+| tests | model, RTL, core and gate-level suites pass; signed-off GDS for the 3x2 build without the test-access pins | final RTL: placement density 64 avoids the CTS bug (F27); sign-off run pending |
 
-Open design issues found by the tests (detail in [docs/results.md](docs/results.md)):
-- processing latency is 2.0 ms against a 1 ms target (wavelet look-ahead);
-- disabling mid-packet, a host stall, or one short ADC frame corrupts the output stream;
-- a worst-case host must read a byte at least every 11 clocks (2.2 us).
+Open items (detail in [docs/results.md](docs/results.md)):
+- OpenROAD CTS left one clock gate without its clock pin at placement density 60 (F27); density
+  64 avoids it (all 126 gates connected), the root cause in OpenROAD is not known;
+- processing latency is 1.85 ms, set by the wavelet look-ahead (F1). It is not observable at the
+  pins (packets decode whole, 13.4 ms); the challenge's "< 1 ms" is read as real-time
+  throughput, which the chip guarantees (C-LAT-1, C-IF-9).
 
 ## Run it
 
@@ -47,7 +50,7 @@ Results land in `reports/latest/summary.md`.
 |---|---|
 | [docs/platform.md](docs/platform.md) | the environment the chip lives in: Neuralink's architecture, Tiny Tapeout limits |
 | [docs/architecture.md](docs/architecture.md) | how the RTL is built, what it costs, where to change what |
-| [docs/constraints.md](docs/constraints.md) | requirements (C-*) and decisions D1-D7 |
+| [docs/constraints.md](docs/constraints.md) | requirements (C-*) and decisions D1-D10 |
 | [docs/testing.md](docs/testing.md) | how to run, test inventory, verification plan (T-*) |
 | [docs/results.md](docs/results.md) | findings, budgets, measured data |
 | [docs/budgets.md](docs/budgets.md) | where each pass/fail number comes from |
@@ -57,7 +60,7 @@ Results land in `reports/latest/summary.md`.
 ```
 model/nlc/     golden model: the bit-exact spec (format in the module docstrings)
 model/tests/   pytest, incl. the algorithm change guard
-src/           RTL: project.v (TT pins) -> nlc_core -> slot_sel / nlc_lossy / out_fifo
+src/           RTL: project.v (TT pins) -> nlc_core -> slot_sel / nlc_lossy (valid-only output)
 test/env/      shared test environment (ADC stream, host, scoreboard, monitors)
 test/core/     nlc_core at the real 256-slot interface
 test/lossy/    lossy core + power scenarios;  test/rans/: rANS coder;  test/: TT top

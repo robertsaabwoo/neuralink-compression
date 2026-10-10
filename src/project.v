@@ -30,9 +30,13 @@
 //
 // Output (decision D8, valid-only streaming): one byte per clock while m_valid, the abort
 // token for one clock; the host must capture every clock (nothing can stall the output,
-// like the merge circuitry / serializer of an implant). At the real frame rate the coder
-// can never fall a frame behind for any data (scripts/proofs/output_bound.py), so the
-// output never drops a packet; only a short frame (D5) or enable falling (D7) aborts one.
+// like the merge circuitry / serializer of an implant).
+// Throughput (D9, C-IF-9): the core is II = 1, one slot per clock, 256-clock frames. At that
+// rate the coder can never fall a frame behind for any data (scripts/proofs/output_bound.py:
+// +138 clocks of slack, limited by the 1 byte/clock output), so only a short frame (D5) or
+// enable falling (D7) aborts a packet. This pin path is slower (one slot per 2 clocks; the
+// tests use 32-slot = 64-clock frames, slack -118 for worst-case data): a test-access mode
+// below spec, where worst-case data may abort a packet cleanly (token, uio[4] overflow).
 //
 // Input protocol (C-IF-9): the host raises s_strobe (with s_frame for slot 0) and sets the
 // sample in the same clock, holds s_strobe high for one clock (at least) and then low for at

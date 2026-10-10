@@ -34,6 +34,11 @@ hold at the fast corner (-40 C, 1.95 V).
 
 ## Expected values (baseline, 2026-10-07)
 
+History: the first measured baseline (the `baseline` column of `scripts/flow/budgets.json`).
+Current values of the final RTL: [results.md](results.md), Budgets. Since then: clock
+gating (power 628 -> ~9.5 uW lossy core, F11), `CLOCK_PERIOD` = 200 in `src/config.json`
+(the 20 ns failure below is gone), and the area round (TT top 48.5k um^2, F22).
+
 | metric | value | status |
 |---|---|---|
 | lint errors | 0 (46 `-Wall` warnings in the rest of the TT design, none fatal) | PASS |

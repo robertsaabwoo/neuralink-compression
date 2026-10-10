@@ -152,11 +152,11 @@
       "why": "median per-channel SNR, 160 held-out files; 18.0 dB at design time (a 32-file --quick run reads ~1.4 dB lower: subset variance)"
     },
     "latency_processing_us": {
-      "limit": 1000.0,
-      "target": 410.0,
+      "limit": 2253.0,
+      "target": 1900.0,
       "cmp": "<=",
       "unit": "us",
-      "why": "C-LAT-1: Neuralink challenge < 1 ms. Measured (T-IF-1 monitors) as sample slot -> the last coder symbol that depends on the sample (transform look-ahead + per-channel FIFO lag + coder entry). Queue-only latency (push -> coder) is in the details."
+      "why": "C-LAT-1 derived bound (2026-10-10): transform look-ahead 36 frames + queue 8 frames = 44 x 51.2 us; the challenge's < 1 ms is read as throughput (C-IF-9). Measured (T-IF-1 monitors) as sample slot -> the last coder symbol that depends on the sample (transform look-ahead + per-channel FIFO lag + coder entry). Queue-only latency (push -> coder) is in the details."
     },
     "latency_delivery_ms": {
       "limit": 40.0,

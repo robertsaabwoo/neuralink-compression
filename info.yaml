@@ -42,14 +42,14 @@ pinout:
   ui[7]: "SAMPLE7 / CFG7"
 
   # Outputs
-  uo[0]: "M_DATA0"
-  uo[1]: "M_DATA1"
-  uo[2]: "M_DATA2"
-  uo[3]: "M_DATA3"
-  uo[4]: "M_DATA4"
-  uo[5]: "M_DATA5"
-  uo[6]: "M_DATA6"
-  uo[7]: "M_DATA7"
+  uo[0]: "M_DATA0 / CFG_RD0"
+  uo[1]: "M_DATA1 / CFG_RD1"
+  uo[2]: "M_DATA2 / CFG_RD2"
+  uo[3]: "M_DATA3 / CFG_RD3"
+  uo[4]: "M_DATA4 / CFG_RD4"
+  uo[5]: "M_DATA5 / CFG_RD5"
+  uo[6]: "M_DATA6 / CFG_RD6"
+  uo[7]: "M_DATA7 / CFG_RD7"
 
   # Bidirectional pins
   uio[0]: "SAMPLE8 (in)"

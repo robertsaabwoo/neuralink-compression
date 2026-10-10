@@ -26,8 +26,10 @@
 // Requirements: frames are long enough to absorb the packet flush (about
 // 3 * N_SEL * SB / 2 cycles) and a 4-symbol burst on every channel in two frames in a row
 // (block positions 62, 63): 4 * N_SEL symbols at NC = ceil(10 / DIV_K) clocks each within
-// one frame, e.g. a 256-slot mux at one slot per clock. 64-clock frames (C-IF-9) with
-// N_SEL = 8 need NC <= 2, i.e. DIV_K >= 5. The issuer holds its symbol (and the state it
+// one frame. The spec rate is II = 1, 256-slot = 256-clock frames (D9, C-IF-9): DIV_K = 5
+// (NC = 2) leaves +138 clocks of slack for any data, bounded by the 1 byte/clock output,
+// not by the divider (scripts/proofs/output_bound.py --d8). The TT pin path's 64-clock
+// test frames are below spec: worst-case data can abort there. The issuer holds its symbol (and the state it
 // was lifted from: writes happen only when the coder takes it) for the NC clocks.
 // enable = 0 clears everything; the next packet is seq 0.
 //

@@ -23,7 +23,7 @@ Pins (`src/project.v`):
 | `uio[1:0]` | in | sample bits 9:8 |
 | `uio[2]` | in | `s_strobe`: rising edge = one slot (or one config byte); asynchronous, synchronised on chip |
 | `uio[3]` | in | `s_frame`: high with the strobe of slot 0 |
-| `uio[4]` | out | `overflow`: sticky, the coder fell a frame behind and dropped a packet (cleared by enable = 0) |
+| `uio[4]` | out | `overflow`: sticky, the coder fell a frame behind and dropped a packet (cleared by enable = 0 or reset) |
 | `uio[5]` | in | `cfg_en`: strobes carry config bytes, address then data; asynchronous, synchronised on chip |
 | `uio[6]` | out | `m_valid` |
 | `uio[7]` | out | `m_last`: this byte ends a packet |
@@ -32,7 +32,10 @@ Pins (`src/project.v`):
 1. With `cfg_en` = 1, write (address, data) pairs: `0x00` = 0x01 (lossy mode), `0x01` = number
    of channels (1-8), `0x10 + i` = slot of channel i (strictly ascending), then `0x00` = 0x81
    (enable).
-2. Feed samples: one strobe per slot, at most one every 2 clocks, frames of at least 64 clocks.
+2. Feed samples: one strobe per slot, at most one every 2 clocks (the test vectors use 32-slot
+   frames = 64 clocks). The chip is designed for one slot per clock and 256-clock frames, where
+   no data can make it drop a packet; at the slower pin rate worst-case data (e.g. noise on
+   every channel) can abort a packet, which shows as the abort token and on `uio[4]`.
 3. Read bytes: every clock with `m_valid` = 1 carries a byte on `uo_out` (`m_last` = 1: the
    packet's last byte). `m_last` = 1 with `m_valid` = 0 is the abort token: drop the partial
    packet. All outputs are registered.

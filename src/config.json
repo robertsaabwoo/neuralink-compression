@@ -13,7 +13,8 @@
 
   "//": "PL_TARGET_DENSITY_PCT - You can increase this if Global Placement fails with error GPL-0302.",
   "//": "Users have reported that values up to 80 worked well for them.",
-  "PL_TARGET_DENSITY_PCT": 60,
+  "//": "nlc: 64, not 60: at 60 OpenROAD CTS dropped one clk_i sink (a g_ch[7] dlclkp left without CLK); placement sweep 2026-10-10 (nightly 38059238643): 56/64/68/72/76 clean, 60 + timing/routability knobs not",
+  "PL_TARGET_DENSITY_PCT": 64,
 
   "//": "CLOCK_PERIOD - Increase this in case you are getting setup time violations.",
   "//": "The value is in nanoseconds, so 20ns == 50MHz. nlc: 200 ns = 5 MHz = ADC slot rate (docs/constraints.md D2).",

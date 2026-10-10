@@ -1,18 +1,19 @@
-# Architecture (as built, 2026-10-07)
+# Architecture (as built, 2026-10-10)
 
-What the RTL does today. Requirements: [constraints.md](constraints.md). Numbers:
-[results.md](results.md). Decisions D5-D7 are **not implemented yet**; where they land is marked.
+What the RTL does today (branch `area4-final-3x2`, RTL a0966c0). Requirements:
+[constraints.md](constraints.md) (decisions D1-D10). Numbers: [results.md](results.md).
 
 ```
  TT pins ─► project.v ─► nlc_core ──────────────────────────────────────────────► TT pins
-          (pin protocol)  ├─ nlc_cfg       config registers
-                          ├─ nlc_slot_sel  256-slot ADC stream -> up to 8 channels
-                          ├─ nlc_encoder   wrapper; mode 1 = nlc_lossy:
-                          │    wavelet -> quantise -> per-channel FIFO -> rANS -> header + bytes
-                          └─ nlc_out_fifo  8-byte output FIFO -> host
+          (pin protocol,  ├─ nlc_cfg       config registers (+ readback mux)
+           CDC, output    ├─ nlc_slot_sel  256-slot ADC stream -> up to 8 channels
+           register)      └─ nlc_encoder   wrapper; mode 1 = nlc_lossy:
+                               sample row -> shared lifter -> quantise -> rANS -> header + bytes
+                               (valid-only byte stream, no back-pressure: D8)
 ```
 
-One clock, 5 MHz = the ADC slot rate (D2). At most one sample per clock; the ADC is never stalled.
+One clock, 5 MHz = the ADC slot rate (D2). The system is II = 1 (D9): at most one sample per
+clock, the ADC is never stalled, and the output consumer takes every byte.
 
 ## Blocks
 
@@ -24,12 +25,14 @@ the host still holds it, by a clock gate whose enable is built from flop outputs
 pin reaches a gate enable; the stage-1 MTBF argument is in `project.v`). A strobe carries one
 10-bit sample (`ui_in` + `uio[1:0]`, `s_frame` = slot 0), or a config byte (address, then
 data) while `cfg_en` = 1. Output: byte on `uo_out`, `m_valid`/`m_last` on `uio[6]/[7]`, all
-from one output register stage (D8: no ack). The pin path manages one sample per 2 clocks at
-most (C-IF-9).
+from one output register stage (+1 clock; D8: no ack). Test access: sticky `overflow` on
+`uio[4]`; config readback on `uo_out` while `cfg_en` = 1 and `CTRL.enable` = 0 (C-IF-12). The
+pin path manages one sample per 2 clocks at most: a test-access mode below the D9 rate (C-IF-9).
 
 **`nlc_cfg`.** Registers: enable (CTRL[7]; the mode bits CTRL[1:0] are ignored, lossy only),
-`n_sel` (1-8), slot per channel (ascending). `enable` = 0 clears the core. The registers of
-the model-only modes 0/2/3 were removed from the RTL (2026-10-08).
+`n_sel` (1-8), slot per channel (ascending), and a read mux for the readback. `enable` = 0
+clears the core. The slot registers are gated storage without reset, read through one
+shared slot mux. The registers of the model-only modes 0/2/3 were removed (2026-10-08).
 
 **`nlc_slot_sel`.** Counts slots (restart on `s_frame`), emits the configured slots as channels
 0..n_sel-1 with first/last-of-frame flags, starting at the first `s_frame` after enable.
@@ -42,8 +45,10 @@ frame before it did not reach all selected slots; the encoder then aborts the pa
    (10 b per channel); the issuer lifts it one level per symbol it issues (kk = 0/1/2: level
    1/2/3 -> d1/d2/d3, a 13-bit register carries a1/a2 between levels and then delta a3 for
    kk = 3). A level whose pair is not complete only stores its input (level 1 in the
-   empty-burst frames, one clock per channel). Per-channel state = 3 registers per level, in
-   rows indexed by channel. All channels share one block position, so the schedule is global.
+   empty-burst frames, one clock per channel). Per-channel state = the sample, 3 registers
+   per level and the previous quantised a3, in rows indexed by channel: **latch rows**
+   (`nlc_lreg`, `LATCH_ROWS` = 1), written from shared staging flops so a latch never feeds
+   its own input (results.md F22, F24). All channels share one block position, so the schedule is global.
    Issue order and cycle timing are those of the former burst buffer (area experiment B,
    2026-10-09: -2 lifters, -32 b/ch of burst buffer).
 2. *Quantise:* right shifts d1 >> 3, d2 >> 2, d3 >> 2, a3 >> 1; a3 is delta-coded. Explicit
@@ -52,10 +57,13 @@ frame before it did not reach all selected slots; the encoder then aborts the pa
    context), taken as soon as the sample is there, frame by frame, channel by channel
    (`nlc.lossy.coding_order`, the bitstream order); a frame needs at most 4 x 8 symbols
    against 256 clocks, so nothing lags. The coder may lag up to a frame; more aborts (the
-   channel's next sample would overwrite the stored one).
-4. *rANS (`nlc_rans`):* one 22-bit state per channel, one symbol per clock, 2 stages:
-   state read + ROM, then renorm + a 10-step combinational divider + write-back (`DIV_REG`
-   can put registers back between the steps; the old 13-stage pipeline cost 547 more flops). Static tables in a synthesised ROM (`nlc_lossy_rom.v`):
+   channel's next sample would overwrite the stored one). At the D9 rate this cannot happen
+   for any data (C-IF-9: the bound is the 1 byte/clock output, results.md F25).
+4. *rANS (`nlc_rans`):* one 22-bit state per channel (latch rows). The 10-step divider is
+   looped: `DIV_K` = 5 quotient bits per clock, so a symbol takes 2 clocks; the issuer holds
+   its symbol (valid/ready) until the coder takes it. 32 symbols x 2 clocks fit a 256-clock
+   frame; the throughput proof gives the same slack as a single-cycle divider (F25). Static
+   tables in a synthesised ROM (`nlc_lossy_rom.v`):
    4 contexts, 64 symbols + escape (escape = 2 raw bytes). 0-4 bytes per symbol. Packet end:
    flush all 8 states, 3 bytes each.
 5. *Serialiser:* header `{mode = 1, seq[5:0]}`, then the coder bytes read in place from the
@@ -67,43 +75,46 @@ Packets decode independently. Format spec: docstrings of `model/nlc/lossy.py`, `
 **Clock gating (`nlc_icg.sv`).** Every register that is not needed every cycle is behind
 a sky130 `dlclkp` integrated clock gate, in two levels. Parent gates open only when a block
 has work: `u_cg_s` (a sample, 8 of 256 clocks), `u_cg_i` (sample or pop), `u_cg_o`
-(serialiser), `u_rans.u_cg_c` (coder busy). Under them, `nlc_greg` registers (one gate +
-plain `dfxtp`, no enable mux) hold each channel's wavelet fields, each FIFO slot, each coder
-state row, stage A, the output word and the serialiser buffer. Control registers clear
-asynchronously on `clr_n` (`rst_n && enable`), so a disabled core sees no clock edge.
+(serialiser), `u_rans.u_cg_c` (coder busy). Under them, each channel's wavelet fields and
+coder state are `nlc_rreg` rows (one gate + a latch row, `nlc_lreg`; or plain `dfxtp`
+flops, `nlc_greg`, when `LATCH_ROWS` = 0), and `nlc_greg` holds the staging registers, the
+output word and the serialiser buffer. The gate of a row (`g_ch[i].u_*.u_icg`) hangs off a
+parent clock such as `clk_i`. Control registers clear asynchronously on `clr_n`
+(`rst_n && enable`), so a disabled core sees no clock edge.
 RTL simulation models `nlc_greg` as an enable flop (same behaviour, faster in Icarus);
 synthesis and gate-level use the real cell (`+define+NLC_ICG_SIM` simulates the gate in RTL).
 Only `overflow` runs on `clk` in the core. Outside it: `nlc_cfg` (one gate, opens on a config
-write), `nlc_out_fifo` (a gate per entry, one for the pointers), `nlc_slot_sel` (async clear
-on `rst_n && enable`, counters gated on slots while enabled, sample registers on a hit),
-`project.v` (config address/data gated). Clocked every cycle: the TT pin registers and
-the few flops that must run (`slot_sel` counters while enabled).
+write), `nlc_slot_sel` (async clear on `rst_n && enable`, counters gated on slots while
+enabled, sample registers on a hit), `project.v` (sample/config loads gated on selected
+strobes). Clocked every cycle: the pin synchronisers, the output register and the few flops
+that must run (`slot_sel` counters while enabled). The pin registers hang off their own
+always-on gate and one gate sits in front of the whole core, so CTS has no nets mixing
+gates and flops to balance (results.md F19, F20).
 
-**Abort (D5/D6/D7).** `nlc_lossy` aborts the packet in flight when the coder falls more than
-a frame behind (blocked output: the next burst would overwrite one not yet coded) or on a
-short frame: issuer, coder and serialiser clear, samples are ignored while frames keep
-counting, and output resumes at the next packet start at which the FIFO takes bytes (its
-header carries that packet's seq, so the gap names the lost packets). The encoder ends a
-packet the host holds partly with the **abort token** (also when `enable` falls; its token
-logic is reset by `rst_n` only). On the TT pins: `m_last` = 1 with `m_valid` = 0, acked like a
-byte.
+**Abort (D5/D6/D7).** `nlc_lossy` aborts the packet in flight on a short frame, or when the
+coder falls more than a frame behind (the next burst would overwrite one not yet coded; since
+D8 only possible below the D9 rate; it sets the sticky `overflow`): issuer, coder and
+serialiser clear, samples are ignored while frames keep counting, and output resumes at the
+next packet start (its header carries that packet's seq, so the gap names the lost
+packets). The encoder ends a packet the consumer holds partly with the **abort token** (also
+when `enable` falls; its token logic is cleared by reset only). On the TT pins: `m_last` = 1
+with `m_valid` = 0 for one clock.
 
-**`nlc_out_fifo`.** 8 entries of {abort, last, byte}, valid/ready; `m_abort` with the head.
+**Output (D8).** No output FIFO: the serialiser drives the byte stream directly, one byte per
+clock while `m_valid`, `m_abort` for one clock. The TT top registers it once.
 
 ## Cost today
 
 | | value |
 |---|---|
-| area | 59,200 um^2 lossy core (was 128,000), 66,000 um^2 `nlc_core`; 23% of an 8x2 TT design |
-| flip-flops | 1,573 + 127 clock gates in the lossy core (was 2,681) |
-| state per channel | ~146 b: 114 wavelet + 10 sample + 22 coder (Neuralink spike path: 226 b/ch) |
-| timing | 122 ns slack at ss / 200 ns (TT top); deepest path ~117 cells (TT unit-delay gate sim needs < 200) |
-| power | `nlc_core` (system): 12.3 uW op, 0.93 uW idle. Lossy core: 8.1 uW op, 8.7 worst, 0.16 idle (was 629 uW; budget 40/16 uW, idle 10/2) |
+| area | TT top 48,518 um^2 synth (the lossy core alone was 128,000 um^2 on 2026-10-07); 3x2 tiles, post-CTS utilisation 0.553 (D10) |
+| storage | 337 flops + per-channel latch rows + 126 clock gates (TT top) |
+| state per channel | 146 b: 124 sample/wavelet + 22 coder (Neuralink spike path: 226 b/ch) |
+| timing | +129.0 ns setup slack at ss / 200 ns, +0.187 ns hold at ff (pre-layout); latch D pins excluded from place-and-route setup repair (`src/pnr.sdc`, results.md F24) |
+| power | routed, real data, signed off (e13 RTL, before the area round): 34.8 uW running / 9.5 uW idle for the TT top, core 23.8 / 0.80. Final RTL: preview only, synthetic data (results.md, Budgets) |
 
-Remaining levers (2026-10-08, docs/results.md): latch-based storage for the gated rows
-(~-8k um^2, same-cycle read/write hazards); the read muxes (8:1 x 114 b wavelet state, 32:1 x
-13 b bursts, ~9k um^2) only go away with rotating storage, which costs ~+6.5 uW; register
-widths are already at the filter bounds; removing coder stage A saves 64 flops but no area.
+Open: the OpenROAD CTS bug that leaves one `g_ch[7]` clock gate without CLK (results.md
+F27); the definition of processing latency (F1).
 
 ## Where to change what
 
@@ -111,5 +122,8 @@ widths are already at the filter bounds; removing coder stage A saves 64 flops b
 |---|---|---|
 | algorithm (shifts, block, tables) | `model/nlc/lossy.py`, then RTL constants, ROM via `scripts/gen_lossy_rom.py` | `pytest` (change guard), `test/lossy`, `test/core` |
 | D5 frame rule | `smp_tick`/`smp_short` in `nlc_slot_sel.v`, abort in `nlc_lossy.sv` | T-ROB-4 |
-| D6/D7 abort, resume, token | abort/skip/resume in `nlc_lossy.sv`, token in `nlc_encoder.v`, `nlc_out_fifo.v`, `m_abort` on `nlc_core`, pins in `project.v` | T-OVF-1/2, T-IF-3b, T-ROB-2/3/7 |
+| D6/D7 abort, resume, token | abort/skip/resume in `nlc_lossy.sv`, token in `nlc_encoder.v`, `m_abort` on `nlc_core`, pins in `project.v` | T-IF-3, T-ROB-2/3/4/7 |
+| throughput (D9) | coder speed `DIV_K` in `nlc_lossy.sv` / `nlc_rans.sv`; output rate in the serialiser | T-BW-3, `scripts/proofs/output_bound.py` |
+| pins, CDC, test access | `project.v` (synchronisers, output register, overflow pin), readback mux in `nlc_cfg.v` | `test/` (T-IF-4/6/7), STA recovery |
+| place and route | `src/config.json` (LibreLane), `src/pnr.sdc` (latch D pins out of setup repair), `info.yaml` tiles | `cts_preview`, `gds` on GitHub |
 | power (clock gating) | `nlc_icg.sv`; parent gates and `nlc_greg` rows in `nlc_lossy.sv`, `nlc_rans.sv` | everything + `nlc.py power` (fails if an activity annotation is lost) |

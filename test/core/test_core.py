@@ -158,6 +158,23 @@ async def t_bw_1(dut, case):
     report(env, {"source": source})
 
 
+BW3_SLOTS = {"end": list(range(248, 256)), "start": list(range(8))}
+BW3_SOURCES = [("lfsr", 2), ("nyquist", 1), ("full", 1)]
+
+
+@cocotb.test(**TIMEOUT)
+@cocotb.parametrize(slots=list(BW3_SLOTS), case=BW3_SOURCES)
+async def t_bw_3(dut, slots, case):
+    """T-BW-3 (C-IF-9, C-OVF-5): II=1, 256-slot frames, worst-case data on 8 adjacent channels
+    (the tightest placement of scripts/proofs/output_bound.py): no abort, bit-exact."""
+    source, n = case
+    env = await fresh(dut, f"t_bw_3_{slots}_{source}")
+    env.configure(BW3_SLOTS[slots])
+    env.play_source(source, n)
+    await env.run(n)
+    report(env, {"source": source, "slots": slots})
+
+
 # T-BW-2 (slowest host turnaround, C-BW-3) and T-OVF-1/2/3 (host stalls: blocked output,
 # C-OVF-1..5) are retired by D8: the output has no back-pressure, a host that stalls it does
 # not exist (docs/constraints.md D8, docs/testing.md).

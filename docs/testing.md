@@ -40,14 +40,15 @@ Results: `reports/latest/summary.md`, `reports/latest/metrics.json`, logs and ne
 ### 2.2 RTL (cocotb 2.1, Icarus, bit-exact against the golden model)
 | suite | DUT | tests | checks |
 |---|---|---|---|
-| `test/lossy` | `nlc_lossy` (wavelet, FIFO, rANS, serialiser) | `adjacent_slots_short_frames` (8 channels back to back, 64-slot frames, output stalls 20%), `spread_slots_256` (8 of 256 slots, one slot per clock), `power_window` (1 packet at the operating point) | bytes == model, **then decoded** by the model; FIFO `overflow` = 0; prints bits/sample and SNR. Real challenge data (files 300+, not in ROM training) or synthetic if `data/raw` is absent |
+| `test/lossy` | `nlc_lossy` (wavelet, shared lifter, rANS, serialiser) | `adjacent_slots_short_frames` (8 channels back to back, 64-slot frames: below the D9 rate, a functional check on real data), `spread_slots_256` (8 of 256 slots, one slot per clock), `power_window` (1 packet at the operating point) | bytes == model, **then decoded** by the model; `overflow` = 0; prints bits/sample and SNR. Real challenge data (files 300+, not in ROM training) or synthetic if `data/raw` is absent |
 | `test/rans` | `rans_tdm_static`, `rans_tdm_adaptive` (`src/robs_rANS`) | static: reset table, loaded tables + reload, full-rate II=1, writes ignored while packet open; adaptive: random gaps + backpressure, full-rate II=1 | bytes == model, decoded |
-| `test/` (TT top) | `tt_um_nlc_compressor` through the pins | `test_plumbing`: config registers, slot selector; `test_modes`: lossless, binned, **lossy**, sbp, lossless_host_never_waits | bytes == vectors from `scripts/gen_vectors.py` (4 channels in a 16-slot frame, 10 clocks per slot) |
-| `test/` with `ENCODER=replay` | TT top with `test/mock/nlc_encoder_replay.v` | same 7 | harness self-test: pins, config, slot selector, FIFO with the golden bytes replayed |
-| `test/core` | `nlc_core` (slot selector, encoder, output FIFO, config) at the real interface: 256 slots, one per clock, 200 ns | T-IF-1/2/3, T-BW-1/2, T-OVF-1/2/3, T-ROB-1..6 (42 cases; T-ROB-1 needs `NLC_LONG=1`) | environment `test/env/nlc_env.py` (4.1): ADC mux, config port, host model, scoreboard by seq, monitors for latency/bandwidth/coverage; one JSON per test in `$NLC_RESULTS` |
+| `test/` (TT top) | `tt_um_nlc_compressor` through the pins | `test_plumbing`: config registers, slot selector, config readback (T-IF-6), overflow pin (T-IF-7); `test_modes`: **lossy**; `test_power`: T-PWR-3 scenarios | bytes == vectors from `scripts/gen_vectors.py` (32-slot frames, 2 clocks per slot) |
+| `test/` with `ENCODER=replay` | TT top with `test/mock/nlc_encoder_replay.v` | same, minus the overflow pin (needs the real encoder) | harness self-test: pins, config, readback, slot selector, output capture with the golden bytes replayed |
+| `test/core` | `nlc_core` (slot selector, encoder, config) at the real interface: 256 slots, one per clock (II = 1, D9), 200 ns | T-IF-1/2/3, T-BW-1/3, T-ROB-1..7, T-PWR-2 (T-ROB-1 needs `NLC_LONG=1`) | environment `test/env/nlc_env.py` (4.1): ADC mux, config port, host model (takes every byte, D8), scoreboard by seq, monitors for latency/bandwidth/coverage; one JSON per test in `$NLC_RESULTS` |
 
-The TT-top suite now runs at 200 ns (D2), one slot every 2 clocks, 32-slot frames (64 clocks,
-C-IF-9); lossy only (D1: the modes 0/2/3 tests and vectors were removed). `make GATES=local
+The TT-top suite runs at 200 ns (D2), one slot every 2 clocks, 32-slot frames (64 clocks):
+the pin path is a test-access mode below the D9 rate (C-IF-9), fine for real and synthetic
+data; lossy only (D1: the modes 0/2/3 tests and vectors were removed). `make GATES=local
 NETLIST=reports/latest/top_netlist.v` runs it on our Yosys netlist (T-GL-2). `test/lossy` adds the
 power scenarios of 4.4 (`test_power_op/n4/worst/floor`), `gl_dump.v` takes `+vcd_start=<ns>`.
 
@@ -80,8 +81,12 @@ power scenarios of 4.4 (`test_power_op/n4/worst/floor`), `gl_dump.v` takes `+vcd
 | 2026-10-08 | full check (model, lint, rtl, core, synth, sta, gl, power; 17.8 min with the parallel runner) on eager drain + gated TT top | all pass except T-ROB-5 (test deposited into renamed registers; fixed: it now finds every `nlc_greg`, 189 registers, 3/3 pass); new T-PWR-2 (`t_pwr_op`/`t_pwr_idle`, `nlc_core` gate level): 15.9 / 2.5 uW |
 | 2026-10-08 | D5-D7 implemented (abort/skip/resume, abort token, short frame = abort); lint, rtl, core (10.7 min), replay | **all pass: test/core 48/48, KNOWN_FAIL empty**; lossy 8/8, TT top 4/4, replay 4/4. Gate level / STA not re-run for D5-D7 (functional check only, as asked); `gds` action on the 4x2 tiles is the next hardening check |
 | 2026-10-08 | `layout` on the routed design of `a9c2329` (T-PWR-3, T-FAN-1); `power` re-run on D5-D7 RTL | routed netlist bit-exact on real data through the pins; 80.0 uW op / 51.4 uW idle (pre-layout same scenario 16.8 / 6.0), clock buffers 47.8 / 39.4 uW (F17); 3,283 / 366 slew pins at ss / tt, same as LibreLane (F18); T-PWR-1/2 on D5-D7: lossy 8.30 uW, core 12.5 / 1.07 uW (annotator change verified neutral: identical activity on the same VCD) |
+| 2026-10-09 | power round on the routed design (CTS latency balancer, pin registers, E1/E3; nightly sweep of 21 LibreLane variants) | e13: 34.8 / 9.5 uW running / idle, routed, real data, signed off (F19-F21) |
+| 2026-10-09/10 | area experiments B (shared lifter), C (looped divider, DIV_K = 5), G (flow: drive-1 cells, hold margins, CTS buffers), glue, D8 (valid-only output), S3 (latch rows) stacked; CDC + DFT on the TT top (a0966c0) | final RTL: TT-top synth 48,518 um^2, 337 flops; lint 0, `test/` 5/5, `test/core` 40 pass / 0 fail, `test/lossy` 8/8, final-netlist gate level (TT top + lossy) pass, STA ss +129.0 ns, ff hold +0.187 ns; only flow FAIL was `latency_processing_us` 1,846 against the old 1 ms (F1; C-LAT-1 restated to the derived 2,253 us bound, now PASS); T-BW-3 6/6 (F22-F27) |
+| 2026-10-10 | 2x2 fit (gds runs on GitHub) | 8 channels do not route in 2x2 (F23); 3x2 and 4x2 signed off (gds, gl_test, precheck) for the stack and the pre-DFT all-in build |
+| 2026-10-10 | final candidate `area4-final-3x2` (a0966c0 in 3x2): latch pre-check (place-and-route SDC), `ENCODER=replay`; `cts_preview` | latch D endpoints chased: 0; replay 4 pass, 1 skip (overflow pin needs the real encoder); preview util 0.553, hold +0.250 ns, layout gate-level **fails: OpenROAD CTS left a clock gate without CLK (F27, open)** |
 
-Findings F1-F9, budgets and the measured data: [results.md](results.md).
+Findings F1-F27, budgets and the measured data: [results.md](results.md).
 
 ## 4. Verification plan (testing phase)
 
@@ -102,11 +107,11 @@ so that each test only picks a scenario:
 |---|---|---|---|
 | **ADC mux driver** | the 256-slot stream at one slot per clock, `s_frame` on slot 0, never waits (C-IF-1..3) | `n_slots` (256; short frames for robustness only), data source per slot, frame-length faults (C-IF-8) | extend `test/harness.py` (`SLOT_CYCLES` -> 1, frame 256) |
 | **Data sources** | challenge recordings (held-out files 300+), synthetic, generator patterns (4.2), edge patterns: all 0, all 1023, DC + step, full-scale square at Nyquist (largest wavelet details), single-channel spikes | per-channel source, seed | extend `model/nlc/data.py` |
-| **Pin-path driver** | the slow real-data path through the pins with the `src/project.v` strobe protocol (C-IF-9) | clocks per slot (>= 2), slots per frame, frame >= 64 clocks | exists (harness), extend |
-| **Host model** | RP2040-like reader on the `m_ack` protocol: turnaround in clocks per byte (fixed, random, bursty), pauses of N clocks, "stops acking" (C-OVF-*) | turnaround distribution, stall schedule, seed | extend `read_bytes` |
+| **Pin-path driver** | the slow real-data path through the pins with the `src/project.v` strobe protocol (C-IF-9: below the D9 rate, aborts allowed for worst-case data) | clocks per slot (>= 2), slots per frame | exists (harness) |
+| **Host model** | takes a byte in every clock with `m_valid` (D8: no ack, no stall); drops a partial packet on the abort token. The turnaround/stall models of the `m_ack` protocol were retired with D8 | | exists |
 | **Config driver** | register writes; legal sequences and illegal ones (write while enabled, non-ascending slots) | | exists, extend |
-| **Scoreboard** | splits the byte stream into packets on `m_last`, checks header/seq, compares each packet with `LossyCodec` for its frames (by seq, so lost packets are allowed when the test expects them), decodes, computes SNR and bits/sample | expected-loss mode for T-OVF | new (logic exists inside `test/lossy/test_lossy.py`) |
-| **Monitors** | per-sample timestamps (slot in, symbol into coder, packet's last byte out) for latency; bytes per frame and output FIFO occupancy for bandwidth; coverage counters (4.5) | | new |
+| **Scoreboard** | splits the byte stream into packets on `m_last`, checks header/seq, compares each packet with `LossyCodec` for its frames (by seq, so lost packets are allowed when the test expects them), decodes, computes SNR and bits/sample | expected-loss / expected-abort modes (T-ROB-2/4) | exists (`test/env/nlc_env.py`) |
+| **Monitors** | per-sample timestamps (slot in, symbol into coder, packet's last byte out) for latency; bytes per frame for bandwidth; coverage counters (4.5) | | exists |
 | **Reports** | each test writes a JSON of measured values (latency, bandwidth, coverage) that `scripts/flow/flow.py` collects into `reports/latest/metrics.json` and scores against budgets | | new |
 
 System-model twin: the same chain without RTL (data source -> `LossyCodec` -> host model
@@ -155,7 +160,7 @@ fails. The tests read every parameter from `LossyConfig` and never hard-code tod
 | ID | test | pass | covers | status |
 |---|---|---|---|---|
 | T-CHG-1 | **Round trip, all data**: encode -> decode for every data source (real, synthetic, edge patterns, LFSR) and several `LossyConfig` variants (block 32/64/128, levels 1-4, other shifts, s_max); `hypothesis` property test on random inputs | decodes; error within the bound the quantiser shifts allow; exact when all shifts = 0 | C-FN-2 | new |
-| T-CHG-2 | **Hardware assumptions still hold** for the edited config: FIFO peak (`fifo_profile`) <= RTL depth 8, lag <= 1 frame; packet flush cycles <= frame length (C-IF-9 formula); coefficient/symbol widths fit the RTL fields (QW 13 bits, state 22 bits); table frequencies sum to M and fit the ROM width | all true, or a message naming the RTL parameter that must change | C-FN-1, C-IF-9 | new |
+| T-CHG-2 | **Hardware assumptions still hold** for the edited config: FIFO peak (`fifo_profile`) <= RTL depth 8, lag <= 1 frame; worst-case bytes per frame <= frame length at 1 byte/clock (C-IF-9, `scripts/proofs/output_bound.py`); coefficient/symbol widths fit the RTL fields (QW 13 bits, state 22 bits); table frequencies sum to M and fit the ROM width | all true, or a message naming the RTL parameter that must change | C-FN-1, C-IF-9 | new |
 | T-CHG-3 | **Quality/rate gate**: T-ALG-2 on a fixed 32-file subset (fast), then the full held-out set in T2 | C-ALG-1/2 limits; WARN if > 2% worse than the baseline | C-ALG-1..3 | new (wraps the `compress` step) |
 | T-CHG-4 | **Streaming == block reference**: the streaming production-order encoder (what the RTL does) == the block transform for the edited config | identical coefficients | C-FN-1 | exists in `test_lossy.py`, parametrise over configs |
 | T-CHG-5 | **Model <-> RTL constant sync**: every `LossyConfig` field the RTL hard-codes (`nlc_lossy.sv` localparams, `nlc_rans.sv` parameters, `nlc_lossy_rom.v` contents) is parsed from the sources and compared with the model; ROM regenerated from `lossy_tables.json` equals the committed ROM | equal; on mismatch, list the fields | C-FN-1 | new (pattern exists: `regs.check_hw_constants`) |
@@ -174,37 +179,43 @@ happens later; the test only tells you which parameter is affected.
 |---|---|---|---|---|
 | T-IF-1 | `nlc_core` at the real interface: 256 slots, one per clock, n_sel = 8, real data, >= 4 packets | bit-exact, 0 lost samples | C-IF-1..3, C-FN-1/2 | exists, pass |
 | T-IF-2 | Slot selection sweep: n_sel 1..8; slots {0}, {255}, {0..7}, {248..255}, spread, random ascending sets (seeded) | bit-exact for each | C-IF-4 | exists, pass (11 slot sets) |
-| T-IF-3 | Start-up: enable mid-frame -> first packet starts at the next `s_frame`, seq 0; enable -> disable -> enable == fresh run | bit-exact, seq 0 | C-IF-5/6 | exists: mid-frame enable pass; re-enable **fails (F2)** |
-| T-IF-4 | TT top through the pins at 5 MHz: config, pin path (C-IF-9), host model reading with the ack protocol | bit-exact | C-IF-9/10 | exists, pass (`test_modes.test_lossy` at 200 ns) |
+| T-IF-3 | Start-up: enable mid-frame -> first packet starts at the next `s_frame`, seq 0; enable -> disable -> enable == fresh run | bit-exact, seq 0 | C-IF-5/6 | exists, pass (F2 fixed by D7) |
+| T-IF-4 | TT top through the pins at 5 MHz: config, pin path (C-IF-9, 1 slot / 2 clocks, 32-slot frames), host capturing every clock with `m_valid` (D8), pin synchronisers and registered outputs (C-IF-11) | bit-exact | C-IF-9..11 | exists, pass (`test_modes.test_lossy` at 200 ns) |
 | T-IF-5 | TT top with the generator (T-GEN-2) at full rate | bit-exact | C-IF-1, G-* | new |
+| T-IF-6 | Config readback on `uo_out` (cfg_en = 1, enable = 0, address strobe); a readback writes nothing | values match the writes | C-IF-12 | exists, pass (`test_plumbing.test_config_readback`) |
+| T-IF-7 | Sticky overflow on `uio[4]`: 8-slot frames (far below the D9 rate) make the coder fall a frame behind; `enable` = 0 clears it | pin high, then cleared | C-IF-12, C-OVF-6 | exists, pass (`test_plumbing.test_overflow_pin`) |
 
-**Overflow (decision D3)**
+**Overflow (decision D3) - retired by D8**
 
-| ID | test | pass | covers | status |
-|---|---|---|---|---|
-| T-OVF-1 | Host stops for a whole packet, then resumes | complete packets bit-exact, the cut packet ends with the abort token, seq gap = lost packets (D6) | C-OVF-1/2 | exists, **fails (F3)** |
-| T-OVF-2 | Stalls starting at the header, mid-payload, in the flush (`NLC_LONG=1`: 4 lengths each) | every packet starting after the resume delivered, nothing outside the stall lost (D6) | C-OVF-3/4 | exists, **fails (F3)** except a 300-clock stall |
-| T-OVF-3 | Today's behaviour, recorded as the "before" point: byte drop + sticky flag | documents the gap to C-OVF-1 | exists (records F3) |
+The output has no back-pressure since D8, so a host that stops taking bytes does not exist.
+Aborts are covered by T-IF-3, T-ROB-2/4/7 and the overflow pin by T-IF-7.
+
+| ID | test | was | status |
+|---|---|---|---|
+| T-OVF-1 | Host stops for a whole packet, then resumes | complete packets bit-exact, abort token, seq gap (D6) | **retired (D8)**; passed on the D6 RTL (2026-10-08) |
+| T-OVF-2 | Stalls at the header, mid-payload, in the flush | packets after the resume delivered (D6) | **retired (D8)**; passed on the D6 RTL |
+| T-OVF-3 | Byte drop + sticky flag, the "before" point | documented F3 | **retired (D8)** |
 
 **Latency and bandwidth (measured by monitors, scored by the flow)**
 
 | ID | test | pass | covers | status |
 |---|---|---|---|---|
 | T-LAT-1 | Timestamp every sample: slot -> coder input, slot -> last byte of its packet; report min/median/max | C-LAT-1/2 limits | C-LAT-1..3 | exists (T-IF-1 monitors) |
-| T-BW-1 | Bytes per frame and per packet (histogram), output FIFO peak occupancy, flush burst length; real, LFSR and edge-pattern data plus model-guided worst packets (4.1) | report; worst case feeds C-BW-3 | C-BW-1/2 | exists, pass |
-| T-BW-2 | Host turnaround sweep (clocks per byte) on worst-case data: find the slowest host with 0 overflow, then verify that host for >= 16 packets | value recorded as the published host requirement | C-BW-3, C-OVF-5 | exists, pass: **11 clocks/byte** |
+| T-BW-1 | Bytes per frame and per packet (histogram), flush burst length; real, LFSR and edge-pattern data (spread slots) plus model-guided worst packets (4.1) | report | C-BW-1/2 | exists, pass |
+| T-BW-2 | Host turnaround sweep (clocks per byte) on worst-case data | was C-BW-3: 11, then 4 clocks/byte | C-BW-3 | **retired (D8)** |
+| T-BW-3 | **Throughput guarantee at II = 1:** `nlc_core`, one slot per clock, 256-slot frames, worst-case data (LFSR, Nyquist square, full scale) on 8 adjacent channels at the end and at the start of the frame (the tightest placement of `scripts/proofs/output_bound.py`) | no abort token, 0 lost packets, bit-exact | C-IF-9, C-OVF-5 | exists, pass (`t_bw_3`, 6/6 on a0966c0: worst 117 bytes/frame vs the proof's 128-byte bound) |
 
 **Robustness**
 
 | ID | test | pass | covers | status |
 |---|---|---|---|---|
 | T-ROB-1 | Long run: >= 70 packets (seq wraps past 63) with the generator, RTL | bit-exact, seq wraps | C-FN-4 | exists (`NLC_LONG=1`), not run yet |
-| T-ROB-2 | Reset and disable at random points (mid-frame, mid-packet, during flush, during host stall); next run == fresh run | bit-exact, no hang | C-IF-6 | exists, **fails (F2)** |
-| T-ROB-3 | Config written while enabled (illegal), then disable/enable | no hang; correct afterwards | C-IF-7 | exists, **fails (F2)** |
-| T-ROB-4 | Frame faults: early `s_frame` (3 variants), late, missing; strict against the frame rule D5 | bit-exact | C-IF-8 | exists: long/missing pass, short x3 **fail (F4)** |
+| T-ROB-2 | Reset and disable at random points (mid-frame, mid-packet, during flush; the host-stall point retired by D8); next run == fresh run | bit-exact, no hang | C-IF-6 | exists, pass |
+| T-ROB-3 | Config written while enabled (illegal), then disable/enable | no hang; correct afterwards | C-IF-7 | exists, pass |
+| T-ROB-4 | Frame faults: early `s_frame` (3 variants), late, missing; strict against the frame rule D5 | bit-exact; a short frame aborts its packet (token, seq gap) | C-IF-8, C-OVF-1..4 | exists, pass |
 | T-ROB-5 | Power-up state: Verilator 2-state with random register init (several seeds) and Icarus/GL with X-init; output identical | identical bytes for all seeds; no X on outputs after the first frame | C-FN-6 | exists, pass (random deposit, 234 regs, 3 seeds) |
-| T-ROB-6 | Random regression: N seeded runs mixing data source, n_sel, slots, host model and stalls (nightly) | 0 failures; failing seed reproducible | all C-FN, C-IF | exists, pass (4 seeds) |
-| T-ROB-7 | `rst_n` mid-packet, during the flush, during a host stall | output empty right after reset; next run == run from power-up (D7) | C-IF-6 | exists, pass |
+| T-ROB-6 | Random regression: N seeded runs mixing data source, n_sel and slots (the random host was retired by D8; nightly) | 0 failures; failing seed reproducible | all C-FN, C-IF | exists, pass (4 seeds) |
+| T-ROB-7 | `rst_n` mid-packet, during the flush (host-stall point retired by D8) | output empty right after reset; next run == run from power-up (D7) | C-IF-6 | exists, pass |
 
 **Gate level, equivalence, implementation**
 
@@ -215,16 +226,16 @@ happens later; the test only tells you which parameter is affected.
 | T-GL-2 | **TT top** netlist (like TT's `gl_test`) runs T-IF-4 and T-IF-5 | bit-exact | C-FN-5, C-TIM-4 | exists, pass (Yosys netlist, `GATES=local`) |
 | T-GL-3 | Post-layout gate-level with SDF from the TT GDS action | bit-exact | C-FN-5, C-TIM-1 | new (after first GDS run) |
 | T-EQ-1 | RTL vs netlist equivalence (Yosys `equiv_*` or SymbiYosys) as a fast check next to T-GL-1 | proven equivalent | C-FN-5, C-RTL-2 | new |
-| T-FV-1 | Formal properties on the plumbing (SymbiYosys): out FIFO keeps order and never loses data when not full; slot selector emits each configured slot exactly once per frame, in order | proven (bounded) | C-IF-2/4 | new |
+| T-FV-1 | Formal properties on the plumbing (SymbiYosys): slot selector emits each configured slot exactly once per frame, in order | proven (bounded) | C-IF-2/4 | new |
 | T-STA-1 | OpenSTA: setup at ss, 200 ns; hold at ff; report Fmax at ss | C-TIM-1/2 | C-TIM-1/2/5 | extend (TT clock -> 200 ns) |
 | T-AREA-1 | Yosys area: lossy core, TT top, per module, flops; generator reported separately | C-AREA-1..3 | C-AREA-1..3 | extend (generator split) |
 | T-AREA-2 | Area vs N_SEL sweep (1, 2, 4, 8): fixed cost and per-channel slope; state bits per channel | report | C-AREA-4 | exists (`area` step, N_SEL 2/4/8/16), not run yet |
 | T-PWR-1 | Power matrix at 5 MHz, tt corner (4.4) | C-PWR-1..5 | C-PWR-* | extended: scenarios op/n4/worst/floor + idle; op measured |
 | T-PWR-3 | **Post-layout power**: the routed netlist of the last GDS run (clock tree as CTS built it, repair and hold buffers) simulated through the TT pins on real data at the operating frame rate (128 slots x 2 clocks = 256 clocks/frame, 8 channels, `test/test_power.py`), bytes checked against the model; OpenSTA with the sign-off SDC (propagated clock) and extracted parasitics (nom SPEF). Clock-network nets use raw toggles. Same scenario on our pre-layout TT-top netlist for the difference. Power by cell class: clock buffers, clock gates, flops, repair buffers, hold buffers, logic | C-PWR-1/2 (`layout_power_uw`, `layout_power_idle_uw`) | C-PWR-1/2 | exists (`layout` step) |
 | T-FAN-1 | **Buffer trees and slews per RTL signal** on the routed netlist: every data net with a real driver expanded through the buffers below it (true fanout, buffers, depth, buffer area, cell types), named by the RTL nets upstream of anonymous drivers; worst slew per tree at ss and tt with routed parasitics vs the sign-off max transition; clock tree summary (free-running vs gated buffers, nested gates). `reports/latest/layout_fanout.md` | report; slew violations WARN | C-PWR, C-AREA | exists (`layout` step) |
-| T-SO-1 | TT GDS action: utilisation, setup/hold after CTS, precheck/DRC/LVS/antenna | C-TIM-2/3, C-AREA-3/5 | | new (after push) |
+| T-SO-1 | TT GDS action: utilisation, setup/hold after CTS, precheck/DRC/LVS/antenna, LibreLane DisconnectedPins | C-TIM-2/3, C-AREA-3/5 | | exists (GitHub `gds` workflow; `cts_preview` for the first ~5 min of it) |
 | T-INF-1 | CI: GitHub `test` (TT) and `ci` (model, RTL) workflows green | green | extended (`model.yml`: TT top + core T-IF); not pushed yet |
-| T-INF-2 | Source-list consistency: `info.yaml`, `test/Makefile`, `LOSSY_SRC` list the same files | identical sets | C-RTL-3 | new |
+| T-INF-2 | Source-list consistency: `info.yaml`, `test/Makefile`, `LOSSY_SRC` list the same files | identical sets | C-RTL-4 | new |
 
 ### 4.4 Power and area measurement method
 
@@ -257,11 +268,9 @@ Must be hit across the regression (T-ROB-6 plus the directed tests), otherwise t
 
 - escapes in each context 0..3; consecutive escapes; an escape as the last symbol of a packet;
 - every symbol value 0..63 in each context (or listed as unreachable);
-- per-channel FIFO occupancy 0..7; the peak of 7 actually reached;
 - rANS hazard stall (`s_tready` low) and back-to-back same-channel symbols;
 - coder output of 0, 1, 2, 3, 4 bytes in one word;
 - packet flush overlapping new samples of the next packet;
-- output FIFO full; host stall starting at header, payload and flush;
 - n_sel = 1..8; slot 0 and slot 255 selected; adjacent selected slots;
 - seq wrap 63 -> 0; enable dropped at each phase (frame, block, packet, flush).
 
@@ -286,8 +295,7 @@ prints its seed and a one-line command that reproduces it.
 3. **Measurement**: T-LAT-1, T-BW-1/2, power matrix, area sweep, T-ALG-2..7. This turns the
    "measure" entries of `docs/constraints.md` into numbers and fills in C-BW-3.
 4. **Peripheral**: generator + model (4.2), T-GEN-1/2, T-IF-5, T-GL-2.
-5. **Overflow tests** T-OVF-1..3 (T-OVF-1/2 are expected to fail on today's RTL; that is the
-   input to the design phase).
+5. **Overflow tests** T-OVF-1..3 (done; retired by D8, replaced by T-BW-3 and T-IF-7).
 6. Restore the TT template files, push, first GDS run -> T-SO-1, T-GL-3, post-layout power.
 
 The testing phase is done when every constraint in `docs/constraints.md` has a test that
@@ -301,15 +309,19 @@ overflow policy) are reproducible by a named test.
 | C-IF-1..3 | T-IF-1, T-IF-5, T-FV-1 |
 | C-IF-4 | T-IF-2, T-FV-1 |
 | C-IF-5..8 | T-IF-3, T-ROB-2..4 |
-| C-IF-9/10 | T-IF-4 |
+| C-IF-9 | T-BW-3, T-IF-4 |
+| C-IF-10/11 | T-IF-4 |
+| C-IF-12 | T-IF-6, T-IF-7 |
 | C-FN-1/2 | T-ALG-1, T-CHG-1..7, T-IF-*, T-GL-*, T-ROB-6 |
-| C-FN-3 | T-ALG-4, T-OVF-2 |
+| C-FN-3 | T-ALG-4, T-ROB-4 |
 | C-FN-4 | T-ROB-1 |
 | C-FN-5 | T-GL-1..3, T-EQ-1 |
 | C-FN-6 | T-ROB-5 |
-| C-OVF-1..5 | T-OVF-1..3, T-BW-2 |
+| C-OVF-1..4 | T-ROB-4, T-IF-3, T-ROB-2 |
+| C-OVF-5 | T-BW-3 |
+| C-OVF-6 | T-IF-7 |
 | C-LAT-* | T-LAT-1 |
-| C-BW-* | T-BW-1/2, T-ALG-6 |
+| C-BW-* | T-BW-1, T-BW-3, T-ALG-6 |
 | C-TIM-* | T-STA-1, T-GL-2/3, T-SO-1 |
 | C-AREA-* | T-AREA-1/2, T-SO-1 |
 | C-PWR-* | T-PWR-1 (4.4), T-PWR-2, T-PWR-3, T-FAN-1 |
