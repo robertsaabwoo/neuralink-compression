@@ -15,7 +15,7 @@
 // the new state back. The next symbol reads the state a cycle later: no hazard logic.
 // DIV_K >= Q_W: everything in one cycle, II = 1 (no loop register).
 //
-// Differences from rans_tdm_static (src/robs_rANS), all for area:
+// Differences from rans_tdm_static (test/rans/ref), all for area:
 //   - tables are a synthesised ROM (nlc_lossy_rom.v, scripts/gen_lossy_rom.py),
 //     not 3 kbit of loadable registers;
 //   - small state (LSH = 2: 22 bits, 3-byte flush, 10 divide steps);

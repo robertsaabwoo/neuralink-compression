@@ -1,8 +1,7 @@
 `default_nettype none
 
 // Tiny Tapeout top level: pins <-> nlc_core.
-// Rename the module to tt_um_<github username>_nlc (must be unique on the shuttle)
-// and update info.yaml and test/tb.v to match.
+// tt_um_nlc_compressor is the shuttle-unique top name (info.yaml top_module, test/tb.v).
 //
 // Pin map:
 //   ui_in[7:0]  in   sample[7:0], or a config byte while cfg_en = 1
