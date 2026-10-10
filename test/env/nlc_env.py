@@ -64,8 +64,6 @@ def codec() -> LossyCodec:
 # ---------------------------------------------------------------------------
 
 _REAL: np.ndarray | None = None
-
-
 def _real() -> np.ndarray | None:
     global _REAL
     raw = ROOT / "data" / "raw"
@@ -284,6 +282,8 @@ class Scoreboard:
 # ---------------------------------------------------------------------------
 
 def _int(sig, default: int = -1) -> int:
+    """Value of a signal; X/Z reads as `default`. Only for internal monitor taps (coverage):
+    the outputs the host acts on go through NlcEnv._pin, which fails on X/Z."""
     v = sig.value
     return int(v) if v.is_resolvable else default
 
@@ -314,6 +314,7 @@ class NlcEnv:
         # host side
         self.rx = bytearray()
         self.rx_first_clock = 0
+        self.n_x = 0                            # X/Z reads on host-facing outputs (_pin)
         # monitors
         self.lossy = self.rans = None
         if monitors:
@@ -363,7 +364,7 @@ class NlcEnv:
         await ClockCycles(self.dut.clk, clocks, rising=False)
         self.dut.rst_n.value = 1
         await ReadOnly()
-        if _int(self.dut.m_valid, 0):
+        if self._pin(self.dut.m_valid):
             self.sb.errors.append(f"m_valid = 1 right after rst_n (clock {self.clock})")
         self.enabled = False
         self.cfg_q.clear()
@@ -491,14 +492,14 @@ class NlcEnv:
 
             await ReadOnly()
             # host: takes every byte (D8); the abort token comes with m_valid = 0
-            valid = _int(d.m_valid) == 1
-            if self.has_abort and _int(d.m_abort, 0):
+            valid = self._pin(d.m_valid) == 1
+            if self.has_abort and self._pin(d.m_abort) == 1:
                 if valid:
                     self.sb.errors.append(f"clock {self.clock}: m_valid with the abort token")
                 self.sb.on_abort(bytes(self.rx), self.clock)
                 self.rx.clear()
             elif valid:
-                b, last = _int(d.m_data, 0), _int(d.m_last, 0)
+                b, last = self._pin(d.m_data), self._pin(d.m_last)
                 if not self.rx:
                     self.rx_first_clock = self.clock
                 self.rx.append(b)
@@ -507,6 +508,17 @@ class NlcEnv:
             if self.lossy is not None:
                 self._monitor()
             self.clock += 1
+
+    def _pin(self, sig) -> int:
+        """Output the host acts on (m_valid, m_abort; m_data/m_last when valid). X or Z is
+        an error, never silently read as 0; the value returned is 0 so the run continues."""
+        v = sig.value
+        if v.is_resolvable:
+            return int(v)
+        self.n_x += 1
+        if self.n_x <= 10:
+            self.sb.errors.append(f"clock {self.clock}: {sig._name} = {v} (X/Z on an output)")
+        return 0
 
     def _on_ctrl(self, en: bool) -> None:
         if self.enabled and not en and self.lossy is not None:
