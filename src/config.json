@@ -20,8 +20,8 @@
   "CLOCK_PERIOD": 200,
 
   "//": "Hold slack margin - Increase them in case you are getting hold violations.",
-  "PL_RESIZER_HOLD_SLACK_MARGIN": 0.1,
-  "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.2,
+  "PL_RESIZER_HOLD_SLACK_MARGIN": 0.25,
+  "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.35,
 
   "//": "nlc latch rows (nlc_lreg): a path into an open latch borrows time and has slack 0 by",
   "//": "definition, so post-CTS setup repair never finished (exp A1: > 45 min). No TNS repair:",
