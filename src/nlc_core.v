@@ -8,7 +8,7 @@
 //   cfg port ───► nlc_cfg ──────────────┘
 module nlc_core #(
     parameter ADC_BITS   = 10,
-    parameter N_SEL      = 8,
+    parameter N_SEL      = 4,
     parameter FIFO_DEPTH = 8
 ) (
     input  wire                 clk,

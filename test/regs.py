@@ -8,7 +8,7 @@ SEL_SLOT = 0x10
 
 MODE_LOSSY = 0x01
 CTRL_ENABLE = 0x80
-N_SEL_MAX = 8
+N_SEL_MAX = 4
 
 
 def config_writes(cfg: dict) -> list[tuple[int, int]]:

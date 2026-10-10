@@ -669,7 +669,7 @@ PHYS_LINE = re.compile(r"^\s*sky130_fd_sc_hd__(fill|decap|tapvpwrvgnd)_\d+\s+\S+
 # T-PWR-3 scenarios (test/test_power.py), VCD start in frames of 256 clocks
 LAYOUT_SCENARIOS = {"op": ("t_pwr3_op", 64), "idle": ("t_pwr3_idle", 0)}
 POWER_VECTORS = ("python scripts/gen_vectors.py --out test/vectors --name power --source real "
-                 "--n-slots 128 --frames 512 --slots 1 20 21 45 64 100 126 127")
+                 "--n-slots 128 --frames 512 --slots 1 20 21 45")
 SLEW_TCL = """{design}
 set f [open {out} w]
 foreach p [get_pins *] {{
