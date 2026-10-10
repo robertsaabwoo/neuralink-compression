@@ -114,9 +114,11 @@ jobs:
       - name: simulate (SDF, 200 ns clock)
         working-directory: test
         run: |
-          set -o pipefail
+          # verdict from results.xml (as TT's test.yaml): CVC exits non-zero on VPI errors it
+          # counts but does not print (cocotb's handle lookups), also when every test passes
           make GATES=sdf SIM=$SIM NETLIST="$GL/sim_nl.v" SDF="$GL/sim.sdf" NLC_PDK="$GL/pdk" \
-            COCOTB_TEST_MODULES="$TESTS" COCOTB_PLUSARGS=+nodump 2>&1 | tee sim.log
+            COCOTB_TEST_MODULES="$TESTS" COCOTB_PLUSARGS=+nodump 2>&1 | tee sim.log || true
+          python -m cocotb_tools.check_results results.xml
 
       - name: timing-check self-test (an input swept through the clock edge must be flagged)
         if: always() && matrix.sim == 'cvc'
@@ -145,6 +147,7 @@ jobs:
             test/sim.log
             test/sdf_cvc_main.log
             test/selfcheck.log
+            test/verilog.log
             test/results.xml
             gl/*.txt
             gl/pdk/verilog/sky130_fd_sc_hd.v
