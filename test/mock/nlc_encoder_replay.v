@@ -2,14 +2,13 @@
 
 // Harness self-test stand-in for src/nlc_encoder.v (make ENCODER=replay).
 // It does no compression: it replays the golden model's expected lossy bytes
-// into the FIFO, so the pins, config path, slot selector, FIFO, back-pressure
-// and the cocotb checker can be verified without the real encoder. If a test
+// as the output stream (one byte per clock, D8), so the pins, config path, slot
+// selector and the cocotb checker can be verified without the real encoder. If a test
 // passes here but fails with the real encoder, the bug is in the encoder.
 module nlc_encoder #(
     parameter ADC_BITS = 10,
     parameter N_SEL    = 8,
-    parameter SEL_W    = $clog2(N_SEL),
-    parameter FIFO_AW  = 3
+    parameter SEL_W    = $clog2(N_SEL)
 ) (
     input  wire                 clk,
     input  wire                 rst_n,
@@ -22,12 +21,11 @@ module nlc_encoder #(
     input  wire                 smp_last,
     input  wire                 smp_tick,
     input  wire                 smp_short,
-    output wire                 wr_en,
-    output wire [7:0]           wr_data,
-    output wire                 wr_last,
-    output wire                 wr_abort,
-    input  wire                 fifo_full,
-    input  wire [FIFO_AW:0]     fifo_count,
+    output wire                 m_valid,
+    output wire [7:0]           m_data,
+    output wire                 m_last,
+    output wire                 m_abort,
+    output wire                 overflow,
     output wire                 busy
 );
 
@@ -47,14 +45,15 @@ module nlc_encoder #(
       started <= 1'b0;
     end else begin
       if (smp_valid) started <= 1'b1;
-      if (wr_en) idx <= idx + 1'b1;
+      if (m_valid) idx <= idx + 1'b1;
     end
   end
 
-  assign wr_en   = started && !fifo_full && (cur[9] === 1'b0);
-  assign wr_data = cur[7:0];
-  assign wr_last = cur[8];
-  assign wr_abort = 1'b0;
+  assign m_valid  = started && (cur[9] === 1'b0);
+  assign m_data   = cur[7:0];
+  assign m_last   = m_valid && cur[8];
+  assign m_abort  = 1'b0;
+  assign overflow = 1'b0;
 
   assign busy = 1'b1;                        // replay: keep the core clocked
 

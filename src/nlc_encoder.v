@@ -17,14 +17,18 @@
 //   Stable while enable = 1. enable = 0 means idle: reset per-channel state
 //   and the packet sequence number so the next run starts from packet 0.
 //
-// Bytes out
-//   Packets byte by byte into the output FIFO (wr_en, wr_data), wr_last with
-//   the final byte of each packet. Held while fifo_full.
+// Bytes out (D8: valid-only stream, no back-pressure)
+//   Packets byte by byte, one byte per clock while m_valid, m_last with the final
+//   byte of each packet. The consumer takes every byte: nothing can hold the
+//   output (scripts/proofs/output_bound.py: at the real frame rate the coder never
+//   falls a frame behind, for any data).
 //
-// Abort token (D6/D7): when the host has part of a packet (bytes of it written to the
-// FIFO, not its last) and that packet is dropped (nlc_lossy abort: blocked output or
-// short frame) or enable falls, an abort token (wr_abort) follows in the FIFO. The
-// token logic is cleared by rst_n only, so it survives enable = 0.
+// Abort token (D5/D7): when the consumer has part of a packet (bytes of it out, not
+// its last) and that packet is dropped (nlc_lossy abort: short frame, or the coder a
+// frame behind, which D8 rules out at the real frame rate) or enable falls, m_abort
+// is high for one clock (with m_valid = 0) in the clock after. The lossy core
+// outputs nothing in that clock (it is skipping or cleared), so the token needs no
+// hold. The token logic is cleared by rst_n only, so it survives enable = 0.
 //
 // Packet format: model/nlc/packet.py and model/nlc/lossy.py (docstring):
 //   header = mode[1:0] (= 1), seq[5:0]; payload; 256 frames per packet.
@@ -32,8 +36,7 @@
 module nlc_encoder #(
     parameter ADC_BITS = 10,
     parameter N_SEL    = 8,
-    parameter SEL_W    = $clog2(N_SEL),
-    parameter FIFO_AW  = 3
+    parameter SEL_W    = $clog2(N_SEL)
 ) (
     input  wire                 clk,
     input  wire                 rst_n,
@@ -51,41 +54,40 @@ module nlc_encoder #(
     input  wire                 smp_tick,   // a new frame started (s_frame), not the first
     input  wire                 smp_short,  // with smp_tick: the frame that ended was short
 
-    // output FIFO write port (nlc_out_fifo)
-    output wire                 wr_en,
-    output wire [7:0]           wr_data,
-    output wire                 wr_last,
-    output wire                 wr_abort,   // write the abort token (D6/D7)
-    input  wire                 fifo_full,
-    input  wire [FIFO_AW:0]     fifo_count,
+    // packet byte stream (valid only, D8)
+    output wire                 m_valid,
+    output wire [7:0]           m_data,
+    output wire                 m_last,     // with m_valid: the byte ends a packet
+    output wire                 m_abort,    // abort token, one clock, m_valid = 0 (D5/D7)
+    output wire                 overflow,   // sticky: the coder fell a frame behind
     output wire                 busy        // needs clock edges while enable = 0
 );
 
-  wire       ly_valid, ly_last, ly_overflow, ly_abort;
+  wire       ly_valid, ly_last, ly_abort;
   wire [7:0] ly_data;
-  reg        tok, in_pkt, en_q;              // token owed, host holds part of a packet
-  wire       tok_wr = tok && !fifo_full;
+  reg        tok, in_pkt, en_q;              // token owed, consumer holds part of a packet
   assign busy = en_q || tok;                 // the edge after enable falls, the token
 
   nlc_lossy #(.N_SEL(N_SEL), .SEL_W(SEL_W)) u_lossy (
       .clk(clk), .rst_n(rst_n), .enable(enable), .n_sel(n_sel),
       .smp_valid(smp_valid), .smp_data(smp_data), .smp_ch(smp_ch), .smp_last(smp_last),
       .smp_tick(smp_tick), .smp_short(smp_short),
-      .m_valid(ly_valid), .m_ready(!fifo_full && !tok), .m_data(ly_data), .m_last(ly_last),
-      .overflow(ly_overflow), .abort_req(ly_abort)
+      .m_valid(ly_valid), .m_data(ly_data), .m_last(ly_last),
+      .overflow(overflow), .abort_req(ly_abort)
   );
 
-  wire data_wr = enable && ly_valid && !fifo_full && !tok;
-  assign wr_en    = data_wr || tok_wr;
-  assign wr_abort = tok_wr;
-  assign wr_data  = tok_wr ? 8'h00 : ly_data;
-  assign wr_last  = !tok_wr && ly_last;
+  // the byte stream straight from the serialiser (its state is registered); the
+  // lossy core clears asynchronously on enable = 0, so enable only guards the edge
+  assign m_valid = enable && ly_valid;
+  assign m_data  = ly_data;
+  assign m_last  = m_valid && ly_last;
+  assign m_abort = tok;
 
-  // the host holds part of a packet after this cycle's write
-  wire in_pkt_nx = data_wr ? !ly_last : in_pkt;
+  // the consumer holds part of a packet after this clock's byte
+  wire in_pkt_nx = m_valid ? !ly_last : in_pkt;
   wire tok_set   = in_pkt_nx && (ly_abort || (en_q && !enable));
   wire gclk;
-  nlc_icg u_cg (.clk(clk), .en(data_wr || tok_wr || tok_set || (enable != en_q)), .gclk(gclk));
+  nlc_icg u_cg (.clk(clk), .en(m_valid || tok || tok_set || (enable != en_q)), .gclk(gclk));
   always @(posedge gclk or negedge rst_n) begin
     if (!rst_n) begin
       tok    <= 1'b0;
@@ -93,7 +95,7 @@ module nlc_encoder #(
       en_q   <= 1'b0;
     end else begin
       en_q <= enable;
-      if (tok_wr) begin
+      if (tok) begin                         // the token is out this clock
         tok    <= 1'b0;
         in_pkt <= 1'b0;
       end else begin
@@ -103,6 +105,12 @@ module nlc_encoder #(
     end
   end
 
-  wire _unused = &{smp_first, fifo_count, ly_overflow, 1'b0};
+`ifndef SYNTHESIS
+  // the lossy core never has a byte in the token's clock (it skips or is cleared)
+  always @(posedge clk) if (rst_n === 1'b1 && tok === 1'b1 && m_valid === 1'b1)
+    $error("nlc_encoder: byte and abort token in the same clock");
+`endif
+
+  wire _unused = &{smp_first, 1'b0};
 
 endmodule

@@ -18,9 +18,10 @@
 // frame, channel by channel (nlc.lossy.coding_order), and lifts the sample one level
 // per issued symbol (shared lifter), so only the sample is buffered per channel: at
 // most 4 x N_SEL symbols per frame against a frame of clocks, so a burst is coded long
-// before the channel's next sample. The coder may lag by up to a frame (packet flush,
-// output back-pressure); more than a frame sets `overflow` (the channel's next sample
-// would overwrite the one not yet lifted).
+// before the channel's next sample. The coder may lag by up to a frame (packet flush);
+// more than a frame sets `overflow` (the channel's next sample would overwrite the one
+// not yet lifted). The output has no back-pressure (D8): one byte per clock while
+// m_valid, and the consumer takes every byte.
 //
 // Requirements: frames are long enough to absorb the packet flush (about
 // 3 * N_SEL * SB / 2 cycles) and a 4-symbol burst on every channel in two frames in a row
@@ -31,10 +32,11 @@
 // enable = 0 clears everything; the next packet is seq 0.
 //
 // Abort (D5/D6): when the coder falls more than a frame behind (a burst would be
-// overwritten: blocked output) or a frame was short (s_frame early), the packet in
+// overwritten; a safety net: with no back-pressure (D8) it cannot happen at the real
+// frame rate) or a frame was short (s_frame early), the packet in
 // flight is dropped: issuer, coder and serialiser are cleared, samples are ignored but
-// frames are still counted (smp_tick), and output resumes at the next packet boundary
-// at which the output can take bytes again; its header carries that packet's seq, so the
+// frames are still counted (smp_tick), and output resumes at the next packet boundary;
+// its header carries that packet's seq, so the
 // gap names the lost packets. abort_req tells the encoder to end a partly sent packet
 // with the abort token. Blocks and rANS states restart at every packet boundary, so
 // nothing else needs clearing.
@@ -42,7 +44,8 @@ module nlc_lossy #(
     parameter int N_SEL = 8,
     parameter int SEL_W = 3,
     parameter int BPP_W = 2,      // 2^BPP_W blocks of 64 frames per packet
-    parameter int DIV_K = 5           // coder: quotient bits per clock (>= 10: one symbol/clock), see nlc_rans
+    parameter int DIV_K = 5,          // coder: quotient bits per clock (>= 10: one symbol/clock), see nlc_rans
+    parameter bit LATCH_ROWS = 1'b1   // per-channel storage in latch rows (nlc_lreg), else flops
 ) (
     input  logic             clk,
     input  logic             rst_n,
@@ -56,11 +59,10 @@ module nlc_lossy #(
     input  logic             smp_tick,     // a new frame started (s_frame; not the first)
     input  logic             smp_short,    // with smp_tick: the frame that ended was short
 
-    output logic             m_valid,
-    input  logic             m_ready,
+    output logic             m_valid,      // one byte per clock, no back-pressure (D8)
     output logic [7:0]       m_data,
     output logic             m_last,
-    output logic             overflow,     // sticky: a packet was aborted (blocked output)
+    output logic             overflow,     // sticky: a packet was aborted (coder a frame behind)
     output logic             abort_req     // packet in flight dropped (one clock)
 );
   // fixed by LossyConfig: adc_bits 10, block 64, levels 3, shifts a 1 / d (3, 2, 2),
@@ -137,7 +139,7 @@ module nlc_lossy #(
   logic iss_busy;
   assign iss_busy = pending != '0;
   nlc_icg u_cg_l (.clk(clk), .en(smp_valid || smp_tick || iss_busy || c_active || abort_now ||
-                                 (m_valid && m_ready)), .gclk(clk_l));
+                                 m_valid), .gclk(clk_l));
   nlc_icg u_cg_s (.clk(clk_l), .en(smp_valid || smp_tick), .gclk(clk_s));
   nlc_icg u_cg_i (.clk(clk_l), .en(smp_valid || iss_busy || abort_now), .gclk(clk_i));
 
@@ -267,23 +269,51 @@ module nlc_lossy #(
   nlc_greg #(.W(13)) u_x (.clk(clk_i), .en((st0 && pv2) || (st1 && pv3) || st2),
                           .d(st2 ? da3 : la), .q(xr));
 
+  // Per-channel rows (nlc_rreg): latch rows when LATCH_ROWS. A latch row is open for
+  // the high phase after its write edge, so its data must come from flops loaded at that
+  // edge: the lifting reads and rewrites channel rr's state in the same step (a latch fed
+  // by the lifter would loop through its own output), and the sample comes from the slot
+  // selector's register, which can take the next channel's sample at that edge. Staging
+  // registers, shared by all channels (one channel is written per step):
+  //   sg_xq: level-1 input (e1 / o1, kk = 0) or quantised a3 (qa_prev, kk = 2)
+  //   sg_e2 / sg_e3: level-2 / 3 input (e2 / o2, e3 / o3; both can be written at kk = 1)
+  //   sg_dp: the level's detail (dp1 / dp2 / dp3)
+  //   sg_sx: the sample (sx, loaded with every sample taken)
+  // Every row then reads and updates exactly like the flops it replaces (new value from
+  // the same edge); a row is never written and read-modified in the same step.
+  logic [11:0] sg_xq, w_xq;
+  logic [10:0] sg_e2;
+  logic [11:0] sg_e3;
+  logic [12:0] sg_dp;
+  logic [9:0]  sg_sx;
+  assign w_xq = kk == 2'd2 ? qa3[11:0] : {2'b00, lx[9:0]};
+  generate
+    if (LATCH_ROWS) begin : g_sg
+      nlc_greg #(.W(12 + 11 + 12 + 13)) u_sg (.clk(clk_i), .en(st),
+          .d({w_xq, e2_d, e3_d, ld}), .q({sg_xq, sg_e2, sg_e3, sg_dp}));
+      nlc_greg #(.W(10)) u_sgx (.clk(clk_s), .en(clr_n && run && smp_valid), .d(x0), .q(sg_sx));
+    end else begin : g_nosg
+      assign {sg_xq, sg_e2, sg_e3, sg_dp, sg_sx} = {w_xq, e2_d, e3_d, ld, x0};
+    end
+  endgenerate
+
   genvar gc;
   generate
     for (gc = 0; gc < N_SEL; gc++) begin : g_ch
       logic wr, iw;                      // this channel's sample (outside clear) / issue step
       assign wr = clr_n && run && smp_valid && smp_ch == SEL_W'(gc);
       assign iw = rr == SEL_W'(gc);
-      nlc_greg #(.W(10)) u_sx  (.clk(clk_s), .en(wr),                    .d(x0),        .q(sx[gc]));
-      nlc_greg #(.W(10)) u_e1  (.clk(clk_i), .en(iw && st0 && !f[0]),    .d(lx[9:0]),   .q(e1[gc]));
-      nlc_greg #(.W(10)) u_o1  (.clk(clk_i), .en(iw && st0 && f[0]),     .d(lx[9:0]),   .q(o1[gc]));
-      nlc_greg #(.W(11)) u_dp1 (.clk(clk_i), .en(iw && st0 && pv1),      .d(ld[10:0]),  .q(dp1[gc]));
-      nlc_greg #(.W(11)) u_e2  (.clk(clk_i), .en(iw && l2_in && !f1[0]), .d(e2_d),      .q(e2[gc]));
-      nlc_greg #(.W(11)) u_o2  (.clk(clk_i), .en(iw && l2_in && f1[0]),  .d(e2_d),      .q(o2[gc]));
-      nlc_greg #(.W(12)) u_dp2 (.clk(clk_i), .en(iw && st1),             .d(ld[11:0]),  .q(dp2[gc]));
-      nlc_greg #(.W(12)) u_e3  (.clk(clk_i), .en(iw && l3_in && !f2[0]), .d(e3_d),      .q(e3[gc]));
-      nlc_greg #(.W(12)) u_o3  (.clk(clk_i), .en(iw && l3_in && f2[0]),  .d(e3_d),      .q(o3[gc]));
-      nlc_greg #(.W(13)) u_dp3 (.clk(clk_i), .en(iw && st2),             .d(ld),        .q(dp3[gc]));
-      nlc_greg #(.W(12)) u_qa  (.clk(clk_i), .en(iw && st2),             .d(qa3[11:0]), .q(qa_prev[gc]));
+      nlc_rreg #(.W(10), .LATCH(LATCH_ROWS)) u_sx  (.clk(clk_s), .en(wr),                    .d(sg_sx),         .q(sx[gc]));
+      nlc_rreg #(.W(10), .LATCH(LATCH_ROWS)) u_e1  (.clk(clk_i), .en(iw && st0 && !f[0]),    .d(sg_xq[9:0]),    .q(e1[gc]));
+      nlc_rreg #(.W(10), .LATCH(LATCH_ROWS)) u_o1  (.clk(clk_i), .en(iw && st0 && f[0]),     .d(sg_xq[9:0]),    .q(o1[gc]));
+      nlc_rreg #(.W(11), .LATCH(LATCH_ROWS)) u_dp1 (.clk(clk_i), .en(iw && st0 && pv1),      .d(sg_dp[10:0]),   .q(dp1[gc]));
+      nlc_rreg #(.W(11), .LATCH(LATCH_ROWS)) u_e2  (.clk(clk_i), .en(iw && l2_in && !f1[0]), .d(sg_e2),         .q(e2[gc]));
+      nlc_rreg #(.W(11), .LATCH(LATCH_ROWS)) u_o2  (.clk(clk_i), .en(iw && l2_in && f1[0]),  .d(sg_e2),         .q(o2[gc]));
+      nlc_rreg #(.W(12), .LATCH(LATCH_ROWS)) u_dp2 (.clk(clk_i), .en(iw && st1),             .d(sg_dp[11:0]),   .q(dp2[gc]));
+      nlc_rreg #(.W(12), .LATCH(LATCH_ROWS)) u_e3  (.clk(clk_i), .en(iw && l3_in && !f2[0]), .d(sg_e3),         .q(e3[gc]));
+      nlc_rreg #(.W(12), .LATCH(LATCH_ROWS)) u_o3  (.clk(clk_i), .en(iw && l3_in && f2[0]),  .d(sg_e3),         .q(o3[gc]));
+      nlc_rreg #(.W(13), .LATCH(LATCH_ROWS)) u_dp3 (.clk(clk_i), .en(iw && st2),             .d(sg_dp),         .q(dp3[gc]));
+      nlc_rreg #(.W(12), .LATCH(LATCH_ROWS)) u_qa  (.clk(clk_i), .en(iw && st2),             .d(sg_xq),         .q(qa_prev[gc]));
     end
   endgenerate
 
@@ -322,9 +352,9 @@ module nlc_lossy #(
   end
 
   // abort: the coder is more than a frame behind, or a frame was short; resume at the
-  // first packet start at which the output takes bytes again (the token is out first)
+  // next packet start (the token is out in the clock after the abort)
   assign abort_now  = clr_n && !skip && (pending > (SEL_W+2)'(n_sel) || (smp_tick && smp_short));
-  assign resume_now = skip && pkt_start && m_ready;
+  assign resume_now = skip && pkt_start;
   assign run        = !skip || resume_now;    // samples of this cycle are processed
   assign abort_req  = abort_now;
   always_ff @(posedge clk_l or negedge clr_n) begin
@@ -360,7 +390,7 @@ module nlc_lossy #(
     end
   end
 
-  always_ff @(posedge clk_i or negedge clr_n) begin // sticky: an abort for blocked output
+  always_ff @(posedge clk_i or negedge clr_n) begin // sticky: an abort, coder a frame behind
     if (!clr_n) overflow <= 1'b0;
     else if (pending > (SEL_W+2)'(n_sel)) overflow <= 1'b1;
   end
@@ -372,7 +402,7 @@ module nlc_lossy #(
   logic [31:0] c_data;
   logic [3:0]  c_keep;
 
-  nlc_rans #(.N_CH(N_SEL), .CH_W(SEL_W), .DIV_K(DIV_K)) u_rans (
+  nlc_rans #(.N_CH(N_SEL), .CH_W(SEL_W), .DIV_K(DIV_K), .LATCH_ROWS(LATCH_ROWS)) u_rans (
       .clk(clk_l), .rst_n(clr_n && !skip), .active(c_active),
       .s_tvalid(r_valid), .s_tready(r_ready), .s_tdata(hsym), .s_tctx(hctx),
       .s_tchan(rr_iss), .s_traw_v(is_esc), .s_traw(hraw), .s_tlast(r_last),
@@ -381,7 +411,8 @@ module nlc_lossy #(
 
   // ---------------------------------------------------------------------------
   // Serialiser: header byte {mode = 1, seq}, then the bytes of the coder's output
-  // word, read in place (no copy); the word is taken (c_ready) with its last byte.
+  // word, read in place (no copy), one byte per clock; the word is taken (c_ready) with
+  // its last byte, so the coder cannot overwrite it before it is out.
   // ---------------------------------------------------------------------------
   logic [1:0] bi;                         // byte of the coder's word being sent
   logic [1:0] b_last;                     // its last byte (keep is contiguous from bit 0)
@@ -393,10 +424,10 @@ module nlc_lossy #(
   assign m_valid = c_valid && !skip;
   assign m_data  = need_hdr ? {2'b01, seq} : c_data[8 * bi +: 8];
   assign m_last  = !need_hdr && w_end && c_last;
-  assign c_ready = m_ready && !need_hdr && w_end;
+  assign c_ready = !need_hdr && w_end;
 
   logic clk_o;
-  nlc_icg u_cg_o (.clk(clk_l), .en((m_valid && m_ready) || abort_now || resume_now),
+  nlc_icg u_cg_o (.clk(clk_l), .en(m_valid || abort_now || resume_now),
                   .gclk(clk_o));
 
   always_ff @(posedge clk_o or negedge clr_n) begin

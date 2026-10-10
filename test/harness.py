@@ -29,7 +29,7 @@ SLOT_CYCLES = int(os.environ.get("SLOT_CYCLES", 2))
 FLUSH_CLOCKS = 2000                                    # lossy: lag frames + packet flush
 GATES = os.environ.get("GATES") in ("yes", "local")   # gate level: no internal probes
 
-S_STROBE, S_FRAME, M_ACK, CFG_EN = 2, 3, 4, 5
+S_STROBE, S_FRAME, CFG_EN = 2, 3, 5        # uio[4] unused (was m_ack; D8: no back-pressure)
 
 
 class Pins:
@@ -95,26 +95,14 @@ async def drive_adc(pins: Pins, frames, slots: list[int], n_slots: int,
         first = False
 
 
-async def read_bytes(pins: Pins, n: int, got: list, max_ack_delay: int = 3, seed: int = 1) -> None:
-    """Act as the host: wait for m_valid, take (byte, last) into `got`, pulse m_ack."""
+async def read_bytes(pins: Pins, n: int, got: list) -> None:
+    """Act as the host: the output streams one byte per clock while m_valid (no ack, D8), so
+    capture (byte, last) at every falling edge where m_valid is high."""
     dut = pins.dut
-    rng = random.Random(seed)
-    await FallingEdge(dut.clk)
     while len(got) < n:
-        await ReadOnly()
-        if not int(dut.m_valid.value):
-            await RisingEdge(dut.m_valid)
-            await FallingEdge(dut.clk)
-            continue
-        got.append((int(dut.m_data.value), int(dut.m_last.value)))
         await FallingEdge(dut.clk)
-        for _ in range(rng.randint(0, max_ack_delay)):   # host back-pressure
-            await FallingEdge(dut.clk)
-        pins.set_uio(1 << M_ACK, 1 << M_ACK)
-        await FallingEdge(dut.clk)
-        pins.set_uio(1 << M_ACK, 0)
-        await ClockCycles(dut.clk, 2)                    # ack edge -> FIFO pop -> new head
-        await FallingEdge(dut.clk)
+        if int(dut.m_valid.value):
+            got.append((int(dut.m_data.value), int(dut.m_last.value)))
 
 
 def load_vectors(mode: str) -> tuple[list[list[int]], list[tuple[int, int]], dict]:
@@ -130,13 +118,13 @@ def load_vectors(mode: str) -> tuple[list[list[int]], list[tuple[int, int]], dic
     return frames, expected, cfg
 
 
-async def run_vector_test(dut, mode: str, max_ack_delay: int = 3) -> None:
+async def run_vector_test(dut, mode: str) -> None:
     frames, expected, cfg = load_vectors(mode)
     pins = await reset(dut)
     await configure(pins, cfg)
     got: list[tuple[int, int]] = []
     adc = cocotb.start_soon(drive_adc(pins, frames, cfg["slots"], cfg["n_slots"]))
-    reader = cocotb.start_soon(read_bytes(pins, len(expected), got, max_ack_delay))
+    reader = cocotb.start_soon(read_bytes(pins, len(expected), got))
     await adc.join()
     # all input delivered: the encoder gets a few slot times to flush
     await First(reader.join(), ClockCycles(dut.clk, max(FLUSH_CLOCKS, 200 * SLOT_CYCLES)))

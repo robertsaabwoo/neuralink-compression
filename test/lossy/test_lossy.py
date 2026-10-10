@@ -11,7 +11,6 @@ with a VCD; in RTL they are ordinary bit-exact tests):
 """
 
 import os
-import random
 import sys
 from pathlib import Path
 
@@ -57,7 +56,6 @@ async def reset(dut, n_sel=N_SEL):
     dut.smp_last.value = 0
     dut.smp_tick.value = 0
     dut.smp_short.value = 0
-    dut.m_ready.value = 0
     await ClockCycles(dut.clk, 3)
     dut.rst_n.value = 1
     dut.enable.value = 1
@@ -83,14 +81,13 @@ async def drive(dut, x, slots, frame_cycles):
     dut.smp_tick.value = 0
 
 
-async def sink(dut, n_packets, p_ready, rng):
+async def sink(dut, n_packets):
+    """Valid-only stream (D8): a byte in every clock with m_valid, nothing can stall it."""
     pkts, cur = [], bytearray()
     while len(pkts) < n_packets:
         await FallingEdge(dut.clk)
-        ready = rng.random() < p_ready
-        dut.m_ready.value = int(ready)
         await ReadOnly()
-        if ready and int(dut.m_valid.value):
+        if int(dut.m_valid.value):
             cur.append(int(dut.m_data.value))
             if int(dut.m_last.value):
                 pkts.append(bytes(cur))
@@ -99,20 +96,20 @@ async def sink(dut, n_packets, p_ready, rng):
     return pkts
 
 
-async def run(dut, n_packets, slots, frame_cycles, p_ready, seed, n_sel=N_SEL, source="real"):
+async def run(dut, n_packets, slots, frame_cycles, n_sel=N_SEL, source="real"):
     slots = slots[:n_sel]
     x = test_data(n_packets, n_sel, source, slots)
     codec = LossyCodec(CFG, default_tables())
     expected = encode_stream(x[:n_packets * FPP], codec)
     await reset(dut, n_sel)
     cocotb.start_soon(drive(dut, x, slots, frame_cycles))
-    got = await sink(dut, n_packets, p_ready, random.Random(seed))
+    got = await sink(dut, n_packets)
     for i, (g, e) in enumerate(zip(got, expected)):
         if g != e:
             k = next((k for k, (a, b) in enumerate(zip(g, e)) if a != b), min(len(g), len(e)))
             raise AssertionError(f"packet {i}: first difference at byte {k} "
                                  f"(got {len(g)} bytes, expected {len(e)})")
-    assert not int(dut.overflow.value), "FIFO overflow"
+    assert not int(dut.overflow.value), "overflow: the coder fell a frame behind"
     y = decode_stream(got, codec, n_sel)
     ref = x[:n_packets * FPP]
     err = (y - ref).astype(float)
@@ -124,38 +121,39 @@ async def run(dut, n_packets, slots, frame_cycles, p_ready, seed, n_sel=N_SEL, s
 
 @cocotb.test(timeout_time=60, timeout_unit="sec")
 async def test_adjacent_slots_short_frames(dut):
-    """All channels back to back (one sample per clock), 64-slot frames, output stalls."""
-    await run(dut, 2, list(range(N_SEL)), 64, 0.8, seed=1)
+    """All channels back to back (one sample per clock), 64-slot frames. (Before D8 the sink
+    also stalled the output at random; with no back-pressure it takes every byte.)"""
+    await run(dut, 2, list(range(N_SEL)), 64)
 
 
 @cocotb.test(timeout_time=60, timeout_unit="sec")
 async def test_spread_slots_256(dut):
     """256-slot mux at one slot per clock, channels spread over the frame."""
-    await run(dut, 2, SPREAD, 256, 1.0, seed=2)
+    await run(dut, 2, SPREAD, 256)
 
 
 @cocotb.test(timeout_time=60, timeout_unit="sec")
 async def test_power_window(dut):
     """The operating point used for power: 8 of 256 slots, one slot per clock, one packet."""
-    await run(dut, 1, SPREAD, 256, 1.0, seed=3)
+    await run(dut, 1, SPREAD, 256)
 
 
 @cocotb.test(timeout_time=120, timeout_unit="sec")
 async def test_power_op(dut):
     """Power scenario op: real data, 8 channels, 2 packets."""
-    await run(dut, 2, SPREAD, 256, 1.0, seed=4)
+    await run(dut, 2, SPREAD, 256)
 
 
 @cocotb.test(timeout_time=120, timeout_unit="sec")
 async def test_power_n4(dut):
     """Power scenario op4: real data, 4 channels, 2 packets."""
-    await run(dut, 2, SPREAD, 256, 1.0, seed=5, n_sel=4)
+    await run(dut, 2, SPREAD, 256, n_sel=4)
 
 
 @cocotb.test(timeout_time=120, timeout_unit="sec")
 async def test_power_worst(dut):
     """Power scenario worst: generator LFSR on the selected slots, 8 channels, 2 packets."""
-    await run(dut, 2, SPREAD, 256, 1.0, seed=6, source="lfsr")
+    await run(dut, 2, SPREAD, 256, source="lfsr")
 
 
 @cocotb.test(timeout_time=60, timeout_unit="sec")
@@ -171,4 +169,4 @@ async def test_power_idle(dut):
 @cocotb.test(timeout_time=120, timeout_unit="sec")
 async def test_power_floor(dut):
     """Power scenario floor: generator constant, 8 channels, 1 packet."""
-    await run(dut, 1, SPREAD, 256, 1.0, seed=7, source="constant")
+    await run(dut, 1, SPREAD, 256, source="constant")

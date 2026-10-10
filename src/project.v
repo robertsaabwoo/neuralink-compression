@@ -9,18 +9,23 @@
 //   uio[1:0]    in   sample[9:8]
 //   uio[2]      in   s_strobe  rising edge = one ADC slot (or one config byte)
 //   uio[3]      in   s_frame   high with the strobe of slot 0
-//   uio[4]      in   m_ack     rising edge = host has taken the byte on uo_out
+//   uio[4]      in   unused (was m_ack; D8: the output has no back-pressure)
 //   uio[5]      in   cfg_en    1: strobes carry config bytes, address then data
-//   uio[6]      out  m_valid
-//   uio[7]      out  m_last    the byte on uo_out ends a packet
-//                              m_last = 1 with m_valid = 0: abort token (D6/D7), the
-//                              host drops its partial packet and acks it like a byte
+//   uio[6]      out  m_valid   uo_out holds a byte in this clock
+//   uio[7]      out  m_last    with m_valid: the byte on uo_out ends a packet
+//                              m_last = 1 with m_valid = 0: abort token (D5/D7), the
+//                              host drops its partial packet
 //   uo_out[7:0] out  m_data
+//
+// Output (decision D8, valid-only streaming): one byte per clock while m_valid, the abort
+// token for one clock; the host must capture every clock (nothing can stall the output,
+// like the merge circuitry / serializer of an implant). At the real frame rate the coder
+// can never fall a frame behind for any data (scripts/proofs/output_bound.py), so the
+// output never drops a packet; only a short frame (D5) or enable falling (D7) aborts one.
 //
 // Off chip, strobes are edge-triggered rather than cycle-exact valid/ready
 // because the pad and mux round trip is ~20 ns (one cycle at 50 MHz). The
-// host must hold s_strobe low for at least one clock between slots, and wait
-// two clocks after an m_ack edge before sampling m_valid/m_data again.
+// host must hold s_strobe low for at least one clock between slots.
 module tt_um_nlc_compressor (
     input  wire [7:0] ui_in,
     output wire [7:0] uo_out,
@@ -34,7 +39,7 @@ module tt_um_nlc_compressor (
 
   // Inputs are registered once at the pads, in three clock groups (power: the TT pins are
   // the only registers that would otherwise clock every cycle, docs/results.md F19/F20):
-  //   every clock     the strobe, ack and cfg_en levels and the edge detectors
+  //   every clock     the strobe and cfg_en levels and the edge detectors
   //   every strobe    the frame flag (the slot selector reads it on every slot)
   //   selected slots  the sample / config byte: read only on a hit or a config write, so it
   //                   loads only on a strobe of a selected slot (s_want), a frame strobe or
@@ -42,8 +47,8 @@ module tt_um_nlc_compressor (
   //                   selector, valid for the next strobe (>= 2 clocks per slot, C-IF-9).
   // CTS pads registers that share a clock net with clock gates (F19), so every group has
   // its own gate (the first one always on).
-  reg       stb_q, ackl_q, cfgen_q;   // pin levels: s_strobe, m_ack, cfg_en
-  reg       strobe_q, ack_q;          // previous levels (edge detect)
+  reg       stb_q, cfgen_q;           // pin levels: s_strobe, cfg_en
+  reg       strobe_q;                 // previous strobe level (edge detect)
   reg       frame_q;                  // s_frame
   reg [7:0] ui_q;                     // sample[7:0] / config byte
   reg [1:0] hi_q;                     // sample[9:8]
@@ -59,16 +64,12 @@ module tt_um_nlc_compressor (
   always @(posedge clk_pins) begin
     if (!rst_n) begin
       stb_q    <= 1'b0;
-      ackl_q   <= 1'b0;
       cfgen_q  <= 1'b0;
       strobe_q <= 1'b0;
-      ack_q    <= 1'b0;
     end else begin
       stb_q    <= uio_in[2];
-      ackl_q   <= uio_in[4];
       cfgen_q  <= uio_in[5];
       strobe_q <= stb_q;
-      ack_q    <= ackl_q;
     end
   end
 
@@ -88,7 +89,6 @@ module tt_um_nlc_compressor (
   end
 
   wire strobe = stb_q & ~strobe_q;
-  wire ack    = ackl_q & ~ack_q;
   wire cfg_en = cfgen_q;
 
   // config bytes: address, then data. cfg_addr/cfg_data are clock-gated (written on a
@@ -127,14 +127,14 @@ module tt_um_nlc_compressor (
       .clk(clk), .rst_n(rst_n),
       .s_valid(strobe & ~cfg_en), .s_frame(frame_q), .s_data({hi_q, ui_q}), .s_want(s_want),
       .cfg_we(cfg_we), .cfg_addr(cfg_addr), .cfg_data(cfg_data),
-      .m_data(m_data), .m_valid(m_valid), .m_last(m_last), .m_abort(m_abort), .m_ready(ack),
+      .m_data(m_data), .m_valid(m_valid), .m_last(m_last), .m_abort(m_abort),
       .overflow(overflow)
   );
 
   assign uo_out  = m_data;
-  assign uio_out = {m_abort | (m_valid & m_last), m_valid & ~m_abort, 6'b0};
+  assign uio_out = {m_abort | m_last, m_valid, 6'b0};   // core: m_last implies m_valid
   assign uio_oe  = 8'b1100_0000;
 
-  wire _unused = &{ena, uio_in[7:6], overflow, 1'b0};
+  wire _unused = &{ena, uio_in[7:6], uio_in[4], overflow, 1'b0};
 
 endmodule

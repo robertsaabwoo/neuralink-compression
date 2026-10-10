@@ -72,8 +72,7 @@ COVERAGE_BINS = ([f"esc_ctx{c}" for c in range(4)] + ["esc_consecutive", "esc_la
                  + [f"occ_{k}" for k in (1, 2, 4)]     # burst buffer after a push
                  + ["rans_hazard_stall", "back_to_back_same_channel"]
                  + [f"coder_word_bytes_{k}" for k in range(5)]
-                 + ["flush_overlaps_samples", "out_fifo_full", "host_stall_header",
-                    "host_stall_payload", "host_stall_flush"]
+                 + ["flush_overlaps_samples"]    # out_fifo_full, host_stall_*: retired (D8)
                  + [f"n_sel_{k}" for k in range(1, 9)]
                  + ["slot0_selected", "slot255_selected", "adjacent_selected", "seq_wrap"]
                  + [f"enable_drop_{p}" for p in ("midframe", "midblock", "midpacket", "flush")])
@@ -81,7 +80,7 @@ POWER_SCENARIOS = {   # name: (test in test/lossy, VCD start in frames: skip sta
     "op": ("test_power_op", 64), "op4": ("test_power_n4", 64),
     "worst": ("test_power_worst", 64), "floor": ("test_power_floor", 0),
     "idle": ("test_power_idle", 0)}
-# T-PWR-2: the whole core (config, slot selector, encoder, output FIFO) at the real interface
+# T-PWR-2: the whole core (config, slot selector, encoder) at the real interface
 CORE_POWER_SCENARIOS = {"core_op": ("t_pwr_op", 64), "core_idle": ("t_pwr_idle", 0)}
 
 BUDGETS = json.loads((HERE / "budgets.json").read_text())
@@ -307,12 +306,7 @@ def collect_core(r: Run, res_dir: Path) -> None:
         r.info["bandwidth_worst"] = {
             "test": worst["test"],
             **{k: v for k, v in worst["bandwidth"].items() if k != "packet_bytes"}}
-        r.info["out_fifo_peak"] = max(v["bandwidth"]["out_fifo_peak"] for v in clean)
         r.info["flush_bytes_max"] = max(v["bandwidth"]["flush_bytes_max"] for v in clean)
-    bw2 = runs.get("t_bw_2")
-    if bw2:
-        r.info["host_turnaround_max_clocks"] = bw2.get("host_turnaround_max_clocks")
-        r.info["host_turnaround_trials"] = bw2.get("trials")
     cov: dict[str, int] = {}
     for v in runs.values():
         for k, n in v.get("coverage", {}).items():
@@ -356,6 +350,11 @@ def _area(stat: str) -> tuple[float, int, int]:
     return area, cells, flops
 
 
+def _latches(stat: str) -> int:
+    top = stat.split("=== design hierarchy ===")[-1]
+    return sum(int(n) for n in re.findall(r"sky130_fd_sc_hd__dlx\w+\s+(\d+)", top))
+
+
 def step_synth(r: Run) -> None:
     top, srcs, n_tiles = info_yaml()
     src = ROOT / "src"
@@ -387,6 +386,7 @@ def step_synth(r: Run) -> None:
     r.metrics["lossy_area_per_ch_mm2"] = area / OP["n_channels"] / 1e6
     r.info["lossy_cells"] = cells
     r.info["lossy_flops"] = flops
+    r.info["lossy_latches"] = _latches(stat)
     cell_area = {"sky130_fd_sc_hd__edfxtp_1": 30.0288, "sky130_fd_sc_hd__dfxtp_1": 20.0192}
     flop_area = sum(int(n) * cell_area[c] for c, n in
                     re.findall(r"(sky130_fd_sc_hd__e?dfxtp_1)\s+(\d+)", stat.split("===")[-1]))
@@ -398,6 +398,7 @@ def step_synth(r: Run) -> None:
     tarea, tcells, tflops = _area((r.out / "top_stat.txt").read_text())
     r.info["top_cell_area_um2"] = tarea
     r.info["top_flops"] = tflops
+    r.info["top_latches"] = _latches((r.out / "top_stat.txt").read_text())
     r.info["tiles"] = n_tiles
     r.metrics["top_utilisation"] = tarea / (n_tiles * OP["tt_tile_um2"])
 
@@ -423,7 +424,8 @@ def step_area(r: Run) -> None:
             r.failed_tests.append(f"area sweep N_SEL={n} (see area_nsel{n}.log)")
             continue
         area, cells, flops = _area(stat.read_text())
-        pts[n] = {"area_um2": round(area), "cells": cells, "flops": flops}
+        pts[n] = {"area_um2": round(area), "cells": cells, "flops": flops,
+                  "latches": _latches(stat.read_text())}
     r.info["area_vs_n_sel"] = pts
     if len(pts) >= 2:
         n = list(pts)
@@ -449,16 +451,36 @@ set_input_delay  {io} -clock clk [delete_from_list [all_inputs] [get_ports clk]]
 set_output_delay {io} -clock clk [all_outputs]
 set_load 0.02 [all_outputs]
 report_checks -path_delay {kind} -format full -digits 3 -group_count 5
-exit
+{extra}exit
+"""
+# latch rows (nlc_lreg): a path into an open latch borrows time and reports slack 0; the
+# worst flop / output slack (paths launched by latches include the borrow) and the
+# smallest unused borrow (max - actual) are reported instead
+STA_MAX_EXTRA = """report_checks -path_delay max -format full -digits 3 -group_count 5 \
+    -to [concat [all_registers -edge_triggered -data_pins] [all_outputs]]
 """
 
 
 def _sta(r: Run, netlist: Path, top: str, corner: str, period: float, kind: str, tag: str):
     tcl = STA_TCL.format(lib=LIB[corner], netlist=netlist, top=top, period=period,
-                     io=round(0.2 * period, 3), kind=kind)
+                         io=round(0.2 * period, 3), kind=kind,
+                         extra=STA_MAX_EXTRA if kind == "max" else "")
     (r.out / f"sta_{tag}.tcl").write_text(tcl)
     _, text = r.sh(f"{STA} {r.out / f'sta_{tag}.tcl'}", f"sta_{tag}.log")
-    slacks = [float(s) for s in re.findall(r"^\s*(-?[\d.]+)\s+slack \((?:MET|VIOLATED)\)", text, re.M)]
+    slacks, spare = [], []
+    for path in text.split("Startpoint:")[1:]:
+        m = re.search(r"^\s*(-?[\d.]+)\s+slack \((?:MET|VIOLATED)\)", path, re.M)
+        if not m:
+            continue
+        if "time borrowed from endpoint" in path:
+            mx = num(r"max time borrow\s+(-?[\d.]+)", path, default=None)
+            act = num(r"actual time borrow\s+(-?[\d.]+)", path, default=None)
+            if mx is not None and act is not None:
+                spare.append(mx - act)
+            continue
+        slacks.append(float(m.group(1)))
+    if spare:
+        r.info.setdefault("sta_latch_borrow_spare_ns", {})[tag] = round(min(spare), 3)
     return min(slacks) if slacks else None
 
 

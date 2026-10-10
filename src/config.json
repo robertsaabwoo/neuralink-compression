@@ -23,6 +23,12 @@
   "PL_RESIZER_HOLD_SLACK_MARGIN": 0.1,
   "GRT_RESIZER_HOLD_SLACK_MARGIN": 0.2,
 
+  "//": "nlc latch rows (nlc_lreg): a path into an open latch borrows time and has slack 0 by",
+  "//": "definition, so post-CTS setup repair never finished (exp A1: > 45 min). No TNS repair:",
+  "//": "only real violations (none at 200 ns) are repaired.",
+  "PL_RESIZER_SETUP_REPAIR_TNS_PCT": 0,
+  "GRT_RESIZER_SETUP_REPAIR_TNS_PCT": 0,
+
   "//": "RUN_LINTER, LINTER_INCLUDE_PDK_MODELS - Disabling the linter is not recommended!",
   "RUN_LINTER": 1,
   "LINTER_INCLUDE_PDK_MODELS": 1,

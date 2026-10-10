@@ -87,4 +87,5 @@ jobs:
             reports/latest/
             !reports/latest/*.vcd
             runs/wokwi/*-openroad-cts/
+            runs/wokwi/*-openroad-resizertimingpostcts/*.log
           if-no-files-found: warn

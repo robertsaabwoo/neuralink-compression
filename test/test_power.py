@@ -20,7 +20,7 @@ TIMEOUT = dict(timeout_time=2000, timeout_unit="ms")
 
 @cocotb.test(**TIMEOUT)
 async def t_pwr3_op(dut):
-    """Real data, 2 packets, host acks after 0-3 clocks (VCD from frame 64)."""
+    """Real data, 2 packets, the host captures every valid clock (VCD from frame 64)."""
     await run_vector_test(dut, "power")
 
 

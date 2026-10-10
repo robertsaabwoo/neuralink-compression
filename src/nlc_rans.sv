@@ -32,7 +32,8 @@ module nlc_rans #(
     parameter int LSH   = 2,       // L = 2^PB << LSH
     parameter int SB    = 3,       // state bytes in the flush: ceil((PB + LSH + 8) / 8)
     parameter int RAW_B = 2,       // raw bytes per escaped symbol
-    parameter int DIV_K = 5        // quotient bits per clock (>= LSH + 8: one cycle)
+    parameter int DIV_K = 5,       // quotient bits per clock (>= LSH + 8: one cycle)
+    parameter bit LATCH_ROWS = 1'b1 // channel states in latch rows (nlc_lreg), else flops
 ) (
     input  logic                   clk,
     input  logic                   rst_n,      // asynchronous clear of the control state
@@ -156,12 +157,26 @@ module nlc_rans #(
   logic [X_W-1:0] wb_x;
   assign wb_x = {l_dq[LAST_K], PB'(l_rem[LAST_K] + F_W'(c_s))};
 
+  // Latch rows (LATCH_ROWS): a state row is open for the high phase after its write edge
+  // (fire), while the issuer's next symbol (c_s) already changes wb_x, so the row is
+  // written from a register loaded at that edge. With the loop, x_l is free then (no
+  // symbol starts in a fire cycle: a_v needs !it_v) and takes wb_x at fire; without it,
+  // a separate staging register does.
+  logic [X_W-1:0] wb_sg;                      // the state row's data
   generate
     if (LOOP) begin : g_loop
-      nlc_greg #(.W(X_W)) u_xl (.clk(clk), .en(rst_n && (start || (it_v && it_c != '0))),
-                                .d({l_rem[DK][PB-1:0], l_dq[DK]}), .q(x_l));
+      logic xl_wb;                            // x_l stages the write-back
+      assign xl_wb = LATCH_ROWS && fire;
+      nlc_greg #(.W(X_W)) u_xl (.clk(clk), .en(rst_n && (start || (it_v && it_c != '0) || xl_wb)),
+                                .d(xl_wb ? wb_x : {l_rem[DK][PB-1:0], l_dq[DK]}), .q(x_l));
+      assign wb_sg = LATCH_ROWS ? x_l : wb_x;
     end else begin : g_noloop
       assign x_l = '0;
+      if (LATCH_ROWS) begin : g_sg
+        nlc_greg #(.W(X_W)) u_wb (.clk(clk), .en(rst_n && fire), .d(wb_x), .q(wb_sg));
+      end else begin : g_nosg
+        assign wb_sg = wb_x;
+      end
     end
   endgenerate
 
@@ -199,12 +214,12 @@ module nlc_rans #(
   nlc_greg #(.W(8*O_B + O_B)) u_o (.clk(clk), .en(o_we), .d({o_data_d, o_keep_d}),
                                     .q({o_data, o_keep}));
 
-  // channel state rows: gated, written by the symbol's last divide cycle
+  // channel state rows: gated, written by the symbol's last divide cycle (from wb_sg)
   genvar gc;
   generate
     for (gc = 0; gc < N_CH; gc++) begin : g_st
-      nlc_greg #(.W(X_W)) u_st (.clk(clk), .en(rst_n && fire && s_tchan == CH_W'(gc)),
-                                .d(wb_x), .q(st_mem[gc]));
+      nlc_rreg #(.W(X_W), .LATCH(LATCH_ROWS)) u_st (
+          .clk(clk), .en(rst_n && fire && s_tchan == CH_W'(gc)), .d(wb_sg), .q(st_mem[gc]));
     end
   endgenerate
 
