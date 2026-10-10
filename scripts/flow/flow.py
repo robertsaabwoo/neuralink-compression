@@ -356,6 +356,11 @@ def _area(stat: str) -> tuple[float, int, int]:
     return area, cells, flops
 
 
+def _latches(stat: str) -> int:
+    top = stat.split("=== design hierarchy ===")[-1]
+    return sum(int(n) for n in re.findall(r"sky130_fd_sc_hd__dlx\w+\s+(\d+)", top))
+
+
 def step_synth(r: Run) -> None:
     top, srcs, n_tiles = info_yaml()
     src = ROOT / "src"
@@ -387,6 +392,7 @@ def step_synth(r: Run) -> None:
     r.metrics["lossy_area_per_ch_mm2"] = area / OP["n_channels"] / 1e6
     r.info["lossy_cells"] = cells
     r.info["lossy_flops"] = flops
+    r.info["lossy_latches"] = _latches(stat)
     cell_area = {"sky130_fd_sc_hd__edfxtp_1": 30.0288, "sky130_fd_sc_hd__dfxtp_1": 20.0192}
     flop_area = sum(int(n) * cell_area[c] for c, n in
                     re.findall(r"(sky130_fd_sc_hd__e?dfxtp_1)\s+(\d+)", stat.split("===")[-1]))
@@ -398,6 +404,7 @@ def step_synth(r: Run) -> None:
     tarea, tcells, tflops = _area((r.out / "top_stat.txt").read_text())
     r.info["top_cell_area_um2"] = tarea
     r.info["top_flops"] = tflops
+    r.info["top_latches"] = _latches((r.out / "top_stat.txt").read_text())
     r.info["tiles"] = n_tiles
     r.metrics["top_utilisation"] = tarea / (n_tiles * OP["tt_tile_um2"])
 
@@ -423,7 +430,8 @@ def step_area(r: Run) -> None:
             r.failed_tests.append(f"area sweep N_SEL={n} (see area_nsel{n}.log)")
             continue
         area, cells, flops = _area(stat.read_text())
-        pts[n] = {"area_um2": round(area), "cells": cells, "flops": flops}
+        pts[n] = {"area_um2": round(area), "cells": cells, "flops": flops,
+                  "latches": _latches(stat.read_text())}
     r.info["area_vs_n_sel"] = pts
     if len(pts) >= 2:
         n = list(pts)
@@ -449,16 +457,36 @@ set_input_delay  {io} -clock clk [delete_from_list [all_inputs] [get_ports clk]]
 set_output_delay {io} -clock clk [all_outputs]
 set_load 0.02 [all_outputs]
 report_checks -path_delay {kind} -format full -digits 3 -group_count 5
-exit
+{extra}exit
+"""
+# latch rows (nlc_lreg): a path into an open latch borrows time and reports slack 0; the
+# worst flop / output slack (paths launched by latches include the borrow) and the
+# smallest unused borrow (max - actual) are reported instead
+STA_MAX_EXTRA = """report_checks -path_delay max -format full -digits 3 -group_count 5 \
+    -to [concat [all_registers -edge_triggered -data_pins] [all_outputs]]
 """
 
 
 def _sta(r: Run, netlist: Path, top: str, corner: str, period: float, kind: str, tag: str):
     tcl = STA_TCL.format(lib=LIB[corner], netlist=netlist, top=top, period=period,
-                     io=round(0.2 * period, 3), kind=kind)
+                         io=round(0.2 * period, 3), kind=kind,
+                         extra=STA_MAX_EXTRA if kind == "max" else "")
     (r.out / f"sta_{tag}.tcl").write_text(tcl)
     _, text = r.sh(f"{STA} {r.out / f'sta_{tag}.tcl'}", f"sta_{tag}.log")
-    slacks = [float(s) for s in re.findall(r"^\s*(-?[\d.]+)\s+slack \((?:MET|VIOLATED)\)", text, re.M)]
+    slacks, spare = [], []
+    for path in text.split("Startpoint:")[1:]:
+        m = re.search(r"^\s*(-?[\d.]+)\s+slack \((?:MET|VIOLATED)\)", path, re.M)
+        if not m:
+            continue
+        if "time borrowed from endpoint" in path:
+            mx = num(r"max time borrow\s+(-?[\d.]+)", path, default=None)
+            act = num(r"actual time borrow\s+(-?[\d.]+)", path, default=None)
+            if mx is not None and act is not None:
+                spare.append(mx - act)
+            continue
+        slacks.append(float(m.group(1)))
+    if spare:
+        r.info.setdefault("sta_latch_borrow_spare_ns", {})[tag] = round(min(spare), 3)
     return min(slacks) if slacks else None
 
 

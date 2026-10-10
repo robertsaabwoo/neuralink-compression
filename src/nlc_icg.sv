@@ -48,3 +48,56 @@ module nlc_greg #(
   always_ff @(posedge clk) if (en) q <= d;
 `endif
 endmodule
+
+// nlc_lreg: W-bit latch row (DFFRAM style), the cheaper twin of nlc_greg
+// (dlxtp 15.0 vs dfxtp 20.0 um^2 per bit). The row's clock gate opens the latches
+// for the high phase of the cycle after en (the same edge an nlc_greg would load),
+// so q takes the new value at the same clock edge as a flop would, plus the latch
+// delay. Contract (the caller's): d comes straight from registers loaded at that
+// same edge (a staging register), so it is stable while the row is open and for
+// half a cycle after it closes; d never depends on q of any open row (no loop).
+// No reset: storage written before it is read.
+module nlc_lreg #(
+    parameter int W = 1
+) (
+    input  wire         clk,
+    input  wire         en,
+    input  wire [W-1:0] d,
+    output logic [W-1:0] q
+);
+  wire gclk;
+  nlc_icg u_icg (.clk(clk), .en(en), .gclk(gclk));
+`ifdef SYNTHESIS
+  genvar i;
+  generate
+    for (i = 0; i < W; i++) begin : g_b
+      sky130_fd_sc_hd__dlxtp_1 u_l (.D(d[i]), .GATE(gclk), .Q(q[i]));
+    end
+  endgenerate
+`else
+  // nonblocking: flops clocked by the edge that opens the row sample the old q
+  // (with '=', Icarus could update q before they sample, a zero-delay race).
+  // Plain always: Verilator 5.032 reports NOLATCH for always_latch here.
+  always @(gclk or d) if (gclk) q <= d;
+`endif
+endmodule
+
+// nlc_rreg: a storage row, latches (LATCH = 1: nlc_lreg, d must obey its staging
+// contract) or flops (LATCH = 0: nlc_greg). Same write timing either way.
+module nlc_rreg #(
+    parameter int W     = 1,
+    parameter bit LATCH = 1'b1
+) (
+    input  wire         clk,
+    input  wire         en,
+    input  wire [W-1:0] d,
+    output logic [W-1:0] q
+);
+  generate
+    if (LATCH) begin : g_l
+      nlc_lreg #(.W(W)) u_r (.clk(clk), .en(en), .d(d), .q(q));
+    end else begin : g_f
+      nlc_greg #(.W(W)) u_r (.clk(clk), .en(en), .d(d), .q(q));
+    end
+  endgenerate
+endmodule

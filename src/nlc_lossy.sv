@@ -42,7 +42,8 @@ module nlc_lossy #(
     parameter int N_SEL = 8,
     parameter int SEL_W = 3,
     parameter int BPP_W = 2,      // 2^BPP_W blocks of 64 frames per packet
-    parameter int DIV_K = 5           // coder: quotient bits per clock (>= 10: one symbol/clock), see nlc_rans
+    parameter int DIV_K = 5,          // coder: quotient bits per clock (>= 10: one symbol/clock), see nlc_rans
+    parameter bit LATCH_ROWS = 1'b1   // per-channel storage in latch rows (nlc_lreg), else flops
 ) (
     input  logic             clk,
     input  logic             rst_n,
@@ -267,23 +268,51 @@ module nlc_lossy #(
   nlc_greg #(.W(13)) u_x (.clk(clk_i), .en((st0 && pv2) || (st1 && pv3) || st2),
                           .d(st2 ? da3 : la), .q(xr));
 
+  // Per-channel rows (nlc_rreg): latch rows when LATCH_ROWS. A latch row is open for
+  // the high phase after its write edge, so its data must come from flops loaded at that
+  // edge: the lifting reads and rewrites channel rr's state in the same step (a latch fed
+  // by the lifter would loop through its own output), and the sample comes from the slot
+  // selector's register, which can take the next channel's sample at that edge. Staging
+  // registers, shared by all channels (one channel is written per step):
+  //   sg_xq: level-1 input (e1 / o1, kk = 0) or quantised a3 (qa_prev, kk = 2)
+  //   sg_e2 / sg_e3: level-2 / 3 input (e2 / o2, e3 / o3; both can be written at kk = 1)
+  //   sg_dp: the level's detail (dp1 / dp2 / dp3)
+  //   sg_sx: the sample (sx, loaded with every sample taken)
+  // Every row then reads and updates exactly like the flops it replaces (new value from
+  // the same edge); a row is never written and read-modified in the same step.
+  logic [11:0] sg_xq, w_xq;
+  logic [10:0] sg_e2;
+  logic [11:0] sg_e3;
+  logic [12:0] sg_dp;
+  logic [9:0]  sg_sx;
+  assign w_xq = kk == 2'd2 ? qa3[11:0] : {2'b00, lx[9:0]};
+  generate
+    if (LATCH_ROWS) begin : g_sg
+      nlc_greg #(.W(12 + 11 + 12 + 13)) u_sg (.clk(clk_i), .en(st),
+          .d({w_xq, e2_d, e3_d, ld}), .q({sg_xq, sg_e2, sg_e3, sg_dp}));
+      nlc_greg #(.W(10)) u_sgx (.clk(clk_s), .en(clr_n && run && smp_valid), .d(x0), .q(sg_sx));
+    end else begin : g_nosg
+      assign {sg_xq, sg_e2, sg_e3, sg_dp, sg_sx} = {w_xq, e2_d, e3_d, ld, x0};
+    end
+  endgenerate
+
   genvar gc;
   generate
     for (gc = 0; gc < N_SEL; gc++) begin : g_ch
       logic wr, iw;                      // this channel's sample (outside clear) / issue step
       assign wr = clr_n && run && smp_valid && smp_ch == SEL_W'(gc);
       assign iw = rr == SEL_W'(gc);
-      nlc_greg #(.W(10)) u_sx  (.clk(clk_s), .en(wr),                    .d(x0),        .q(sx[gc]));
-      nlc_greg #(.W(10)) u_e1  (.clk(clk_i), .en(iw && st0 && !f[0]),    .d(lx[9:0]),   .q(e1[gc]));
-      nlc_greg #(.W(10)) u_o1  (.clk(clk_i), .en(iw && st0 && f[0]),     .d(lx[9:0]),   .q(o1[gc]));
-      nlc_greg #(.W(11)) u_dp1 (.clk(clk_i), .en(iw && st0 && pv1),      .d(ld[10:0]),  .q(dp1[gc]));
-      nlc_greg #(.W(11)) u_e2  (.clk(clk_i), .en(iw && l2_in && !f1[0]), .d(e2_d),      .q(e2[gc]));
-      nlc_greg #(.W(11)) u_o2  (.clk(clk_i), .en(iw && l2_in && f1[0]),  .d(e2_d),      .q(o2[gc]));
-      nlc_greg #(.W(12)) u_dp2 (.clk(clk_i), .en(iw && st1),             .d(ld[11:0]),  .q(dp2[gc]));
-      nlc_greg #(.W(12)) u_e3  (.clk(clk_i), .en(iw && l3_in && !f2[0]), .d(e3_d),      .q(e3[gc]));
-      nlc_greg #(.W(12)) u_o3  (.clk(clk_i), .en(iw && l3_in && f2[0]),  .d(e3_d),      .q(o3[gc]));
-      nlc_greg #(.W(13)) u_dp3 (.clk(clk_i), .en(iw && st2),             .d(ld),        .q(dp3[gc]));
-      nlc_greg #(.W(12)) u_qa  (.clk(clk_i), .en(iw && st2),             .d(qa3[11:0]), .q(qa_prev[gc]));
+      nlc_rreg #(.W(10), .LATCH(LATCH_ROWS)) u_sx  (.clk(clk_s), .en(wr),                    .d(sg_sx),         .q(sx[gc]));
+      nlc_rreg #(.W(10), .LATCH(LATCH_ROWS)) u_e1  (.clk(clk_i), .en(iw && st0 && !f[0]),    .d(sg_xq[9:0]),    .q(e1[gc]));
+      nlc_rreg #(.W(10), .LATCH(LATCH_ROWS)) u_o1  (.clk(clk_i), .en(iw && st0 && f[0]),     .d(sg_xq[9:0]),    .q(o1[gc]));
+      nlc_rreg #(.W(11), .LATCH(LATCH_ROWS)) u_dp1 (.clk(clk_i), .en(iw && st0 && pv1),      .d(sg_dp[10:0]),   .q(dp1[gc]));
+      nlc_rreg #(.W(11), .LATCH(LATCH_ROWS)) u_e2  (.clk(clk_i), .en(iw && l2_in && !f1[0]), .d(sg_e2),         .q(e2[gc]));
+      nlc_rreg #(.W(11), .LATCH(LATCH_ROWS)) u_o2  (.clk(clk_i), .en(iw && l2_in && f1[0]),  .d(sg_e2),         .q(o2[gc]));
+      nlc_rreg #(.W(12), .LATCH(LATCH_ROWS)) u_dp2 (.clk(clk_i), .en(iw && st1),             .d(sg_dp[11:0]),   .q(dp2[gc]));
+      nlc_rreg #(.W(12), .LATCH(LATCH_ROWS)) u_e3  (.clk(clk_i), .en(iw && l3_in && !f2[0]), .d(sg_e3),         .q(e3[gc]));
+      nlc_rreg #(.W(12), .LATCH(LATCH_ROWS)) u_o3  (.clk(clk_i), .en(iw && l3_in && f2[0]),  .d(sg_e3),         .q(o3[gc]));
+      nlc_rreg #(.W(13), .LATCH(LATCH_ROWS)) u_dp3 (.clk(clk_i), .en(iw && st2),             .d(sg_dp),         .q(dp3[gc]));
+      nlc_rreg #(.W(12), .LATCH(LATCH_ROWS)) u_qa  (.clk(clk_i), .en(iw && st2),             .d(sg_xq),         .q(qa_prev[gc]));
     end
   endgenerate
 
@@ -372,7 +401,7 @@ module nlc_lossy #(
   logic [31:0] c_data;
   logic [3:0]  c_keep;
 
-  nlc_rans #(.N_CH(N_SEL), .CH_W(SEL_W), .DIV_K(DIV_K)) u_rans (
+  nlc_rans #(.N_CH(N_SEL), .CH_W(SEL_W), .DIV_K(DIV_K), .LATCH_ROWS(LATCH_ROWS)) u_rans (
       .clk(clk_l), .rst_n(clr_n && !skip), .active(c_active),
       .s_tvalid(r_valid), .s_tready(r_ready), .s_tdata(hsym), .s_tctx(hctx),
       .s_tchan(rr_iss), .s_traw_v(is_esc), .s_traw(hraw), .s_tlast(r_last),
