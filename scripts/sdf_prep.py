@@ -1,14 +1,22 @@
 """T-GL-3: sky130 cell models and LibreLane SDF ready for a real-delay gate-level simulation.
 
-  python scripts/sdf_prep.py --pdk <sky130_fd_sc_hd dir> --netlist nl.v --sdf design.sdf --out <dir>
+  python scripts/sdf_prep.py --pdk <sky130_fd_sc_hd dir> --netlist nl.v --sdf design.sdf \
+      --out <dir> --sim icarus|cvc
 
-Writes <out>/pdk/verilog/{primitives.v,sky130_fd_sc_hd.v} (the PDK models, specify blocks kept)
-and <out>/sim.sdf. In open_pdks' merged model file the sized cells (`sky130_fd_sc_hd__dfrtp_1`)
-carry their own specify block (path delays, $setuphold/$recrem/$width with notifiers), so the
-SDF applies as written (the 8afc834 PDK: 102 of 108 cell types, the rest are fill/tap/diode/conb).
-Fallback for a PDK whose sized cells wrap a base cell (`<base> base (...)`, the specify block in
-the base): each such CELL entry is retargeted to `<instance>.base` with the base cell type.
-<out>/sdf_prep.txt: what was done.
+Writes <out>/pdk/verilog/primitives.v (the PDK's UDPs), <out>/pdk/verilog/sky130_fd_sc_hd.v and
+<out>/sim.sdf (the SDF unchanged), and <out>/sdf_prep.txt (what was done).
+
+The cell library is pruned to the cell types the netlist uses, each in its timing variant (open_pdks'
+merged file has four per cell: power pins or not x FUNCTIONAL or not; we keep "no power pins,
+not FUNCTIONAL": the specify block with path delays and $setuphold/$recrem/$width checks that
+toggle a notifier into the flop UDP). Unused cells would only be elaborated as top levels.
+
+--sim cvc: OSS CVC ignores the optional $setuphold/$recrem arguments (timestamp/timecheck
+conditions, delayed reference/data nets), which leaves the cells' *_delayed nets undriven (all
+flops X). Rewritten in 1364-1995 form: the conditions move onto the events (`&&& cond`) and
+`assign X_delayed = X;`. The checks then work on the undelayed signals, so a negative SDF
+limit (sky130 has negative hold/setup on some arcs) is clamped to 0: pessimistic, never misses
+a violation the delayed-signal form would flag.
 """
 
 from __future__ import annotations
@@ -18,14 +26,49 @@ import re
 import shutil
 from pathlib import Path
 
-MOD = re.compile(r"^\s*module\s+(\w+)(.*?)^\s*endmodule", re.S | re.M)
-BASE = re.compile(r"^\s*(sky130_fd_sc_hd__\w+)\s+base\s*\(", re.M)
-CELL = re.compile(r'\(CELL\s*\(CELLTYPE\s+"(\w+)"\)\s*\(INSTANCE\s*([^)]*)\)')
+MOD = re.compile(r"^\s*module\s+(\w+)\b.*?^\s*endmodule\b", re.S | re.M)
+INST = re.compile(r"^\s*(sky130_fd_sc_hd__\w+)\s+(?:#\s*\(.*?\)\s*)?\\?\S+\s*\(", re.M)
+CHECK = re.compile(r"(\$(?:setuphold|recrem))\s*\((.*?)\)\s*;", re.S)
 
 
-def models(text: str) -> dict[str, str]:
-    """module name -> body; the last definition wins (`ifdef'd variants, FUNCTIONAL off)."""
-    return {m.group(1): m.group(2) for m in MOD.finditer(text)}
+def split_args(s: str) -> list[str]:
+    out, depth, cur = [], 0, ""
+    for ch in s:
+        if ch == "," and depth == 0:
+            out.append(cur.strip())
+            cur = ""
+            continue
+        depth += ch == "("
+        depth -= ch == ")"
+        cur += ch
+    out.append(cur.strip())
+    return out
+
+
+def cvc_form(mod: str) -> tuple[str, int]:
+    """1364-1995 timing checks + driven *_delayed nets (see module doc)."""
+    n = 0
+
+    def sub(m: re.Match) -> str:
+        nonlocal n
+        task, args = m.group(1), split_args(m.group(2))
+        if len(args) <= 5:
+            return m.group(0)
+        ref, data, lim1, lim2, notifier = args[:5]
+        conds = (args[5:7] + ["", ""])[:2]
+        if conds[0] and "&&&" not in ref:
+            ref = f"{ref} &&& {conds[0]}"
+        if conds[1] and "&&&" not in data:
+            data = f"{data} &&& {conds[1]}"
+        n += 1
+        return f"{task} ( {ref} , {data} , ({lim1}) , ({lim2}) , {notifier} ) ;"
+
+    mod = CHECK.sub(sub, mod)
+    delayed = re.findall(r"^\s*wire\s+(\w+)_delayed\s*;", mod, re.M)
+    if delayed:
+        assigns = "".join(f"    assign {d}_delayed = {d};\n" for d in delayed)
+        mod = re.sub(r"^(\s*specify\b)", assigns + r"\1", mod, count=1, flags=re.M)
+    return mod, n
 
 
 def main() -> None:
@@ -34,57 +77,55 @@ def main() -> None:
     ap.add_argument("--netlist", type=Path, required=True)
     ap.add_argument("--sdf", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--sim", choices=("icarus", "cvc"), default="icarus")
     a = ap.parse_args()
 
     vdir = a.out / "pdk" / "verilog"
     vdir.mkdir(parents=True, exist_ok=True)
-    for f in ("primitives.v", "sky130_fd_sc_hd.v"):
-        shutil.copy(a.pdk / "verilog" / f, vdir / f)
-    lib = (vdir / "sky130_fd_sc_hd.v").read_text()
-    mods = models(lib)
-    has_spec = {m.group(1) for m in MOD.finditer(lib)           # any `ifdef'd variant
-                if re.search(r"^\s*specify\b", m.group(2), re.M)}
+    shutil.copy(a.pdk / "verilog" / "primitives.v", vdir / "primitives.v")
+    lib = (a.pdk / "verilog" / "sky130_fd_sc_hd.v").read_text()
+    mods: dict[str, str] = {}
+    for m in MOD.finditer(lib):            # the last variant of each cell: no power pins, timing
+        mods[m.group(1)] = m.group(0)
 
-    used = set(re.findall(r"^\s*(sky130_fd_sc_hd__\w+)\s+\S+\s*\(", a.netlist.read_text(), re.M))
-    log = [f"models: {len(mods)} modules, {len(has_spec)} with a specify block",
-           f"netlist: {len(used)} cell types"]
-
-    retarget: dict[str, str] = {}
-    for t in sorted(used):
+    todo = set(INST.findall(a.netlist.read_text()))
+    log = [f"library: {len(mods)} modules; netlist: {len(todo)} cell types"]
+    keep: dict[str, str] = {}
+    while todo:                            # plus any library module a kept cell instantiates
+        t = todo.pop()
+        if t in keep:
+            continue
         if t not in mods:
             log.append(f"  MISSING model {t}")
             continue
-        if t in has_spec:
-            continue
-        b = BASE.search(mods[t])
-        if b and b.group(1) in has_spec:
-            retarget[t] = b.group(1)
-    nospec = sorted(t for t in used if t in mods and t not in has_spec and t not in retarget)
-    log.append(f"specify in the sized cell: {len(used & has_spec)}; in the base (retargeted): "
-               f"{len(retarget)}; none: {len(nospec)} {' '.join(nospec)}")
+        keep[t] = mods[t]
+        todo |= {d for d in INST.findall(mods[t].split("\n", 1)[1]) if d in mods} - keep.keys()
 
-    n = {"kept": 0, "retargeted": 0}
+    nospec = sorted(t for t, b in keep.items() if not re.search(r"^\s*specify\b", b, re.M))
+    log.append(f"kept {len(keep)} cells, {len(keep) - len(nospec)} with a specify block; "
+               f"without: {' '.join(nospec)}")
+    nchk = 0
+    out = ["// pruned from open_pdks sky130_fd_sc_hd.v by scripts/sdf_prep.py "
+           f"(--sim {a.sim})", "`timescale 1ns / 1ps", "`default_nettype wire"]
+    for t in sorted(keep):
+        body = keep[t]
+        if a.sim == "cvc":
+            body, n = cvc_form(body)
+            nchk += n
+        out += ["`celldefine", body, "`endcelldefine", ""]
+    (vdir / "sky130_fd_sc_hd.v").write_text("\n".join(out))
+    if a.sim == "cvc":
+        log.append(f"cvc: {nchk} $setuphold/$recrem rewritten to the 1364-1995 form, "
+                   "*_delayed nets assigned")
 
-    def sub(m: re.Match) -> str:
-        t, inst = m.group(1), m.group(2).strip()
-        if t in retarget and inst:
-            n["retargeted"] += 1
-            return f'(CELL (CELLTYPE "{retarget[t]}") (INSTANCE {inst}.base)'
-        n["kept"] += 1
-        return m.group(0)
-
-    sdf = CELL.sub(sub, a.sdf.read_text())
-    (a.out / "sim.sdf").write_text(sdf)
-    log.append(f"SDF CELL entries: {n['kept']} kept, {n['retargeted']} retargeted to .base")
-    for kind in ("IOPATH", "INTERCONNECT", "SETUP", "HOLD", "SETUPHOLD", "RECOVERY", "REMOVAL",
-                 "WIDTH", "COND"):
+    sdf = a.sdf.read_text()
+    shutil.copy(a.sdf, a.out / "sim.sdf")
+    for kind in ("CELL", "IOPATH", "INTERCONNECT", "SETUP", "HOLD", "SETUPHOLD", "RECOVERY",
+                 "REMOVAL", "WIDTH", "COND"):
         pat = r"[(]" + kind + r"\b"
-        log.append(f"  ({kind}: {len(re.findall(pat, sdf))}")
-    for t in ("sky130_fd_sc_hd__dfrtp", "sky130_fd_sc_hd__dlclkp"):   # what the checks look like
-        if t in mods:
-            body = mods[t]
-            s = body.find("specify")
-            log.append(f"--- {t} specify ---\n" + (body[s:s + 1500] if s >= 0 else "(none)"))
+        log.append(f"  SDF ({kind}: {len(re.findall(pat, sdf))}")
+    neg = re.findall(r"\((?:SETUP|HOLD|RECOVERY|REMOVAL)\b[^\n]*?\(-[0-9.]+", sdf)
+    log.append(f"  SDF timing checks with a negative limit: {len(neg)}")
     (a.out / "sdf_prep.txt").write_text("\n".join(log) + "\n")
     print("\n".join(log))
 

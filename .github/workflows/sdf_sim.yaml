@@ -62,8 +62,17 @@ jobs:
 
       - name: install tools
         run: |
-          sudo apt-get update && sudo apt-get install -y iverilog zlib1g-dev
+          sudo apt-get update && sudo apt-get install -y zlib1g-dev autoconf gperf flex bison
           pip install -r test/requirements.txt ciel
+
+      - name: build Icarus Verilog 13.0 (SDF INTERCONNECT, -ginterconnect; Ubuntu has 12.0)
+        if: matrix.sim == 'icarus'
+        run: |
+          git clone --depth 1 -b v13_0 https://github.com/steveicarus/iverilog "$RUNNER_TEMP/iverilog"
+          cd "$RUNNER_TEMP/iverilog"
+          sh autoconf.sh > /dev/null && ./configure --prefix=/usr/local > /dev/null
+          make -j4 > build.log 2>&1 || { tail -50 build.log; exit 1; }
+          sudo make install > /dev/null
           iverilog -V 2>&1 | head -1
 
       - name: build CVC (open-src-cvc)
@@ -100,7 +109,7 @@ jobs:
           echo "NLC_PDK=$HOME/pdk/sky130A/libs.ref/sky130_fd_sc_hd" >> "$GITHUB_ENV"
 
       - name: cell models and SDF for the simulator
-        run: python scripts/sdf_prep.py --pdk "$NLC_PDK" --netlist "$GL/nl.v" --sdf "$GL/design.sdf" --out "$GL"
+        run: python scripts/sdf_prep.py --pdk "$NLC_PDK" --netlist "$GL/nl.v" --sdf "$GL/design.sdf" --out "$GL" --sim "$SIM"
 
       - name: simulate (SDF, 200 ns clock)
         working-directory: test
@@ -122,5 +131,5 @@ jobs:
             test/sim.log
             test/results.xml
             gl/*.txt
-            gl/*.log
+            gl/pdk/verilog/sky130_fd_sc_hd.v
           if-no-files-found: warn
