@@ -5,7 +5,7 @@
 # TT-top tests through the pins at 200 ns (test_modes.test_lossy bit-exact, test_plumbing).
 # Simulators: CVC (open-src-cvc) runs the timing checks ($setuphold/$recrem/$width notifiers);
 # Icarus annotates delays but ignores timing checks (cross-check of the functional result).
-# Manual only: Actions > sdf_sim > Run workflow, or
+# Manual (a push to branch sdf-sim runs the defaults): Actions > sdf_sim > Run workflow, or
 #   gh workflow run sdf_sim.yaml -R <repo> --ref <branch> -f run_id=<gds run> -f corner=nom_tt_025C_1v80
 name: sdf_sim
 
@@ -114,8 +114,8 @@ jobs:
       - name: simulate (SDF, 200 ns clock)
         working-directory: test
         run: |
-          # verdict from results.xml (as TT's test.yaml): CVC exits non-zero on VPI errors it
-          # counts but does not print (cocotb's handle lookups), also when every test passes
+          # verdict from results.xml (as TT's test.yaml): CVC exits non-zero on errors it counts
+          # but does not print (none in its SDF log), also when every test passes
           make GATES=sdf SIM=$SIM NETLIST="$GL/sim_nl.v" SDF="$GL/sim.sdf" NLC_PDK="$GL/pdk" \
             COCOTB_TEST_MODULES="$TESTS" COCOTB_PLUSARGS=+nodump 2>&1 | tee sim.log || true
           python -m cocotb_tools.check_results results.xml
