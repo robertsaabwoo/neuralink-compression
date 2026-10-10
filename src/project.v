@@ -214,8 +214,14 @@ module tt_um_nlc_compressor (
   wire [7:0] data_q;
   // DFT mode 2 (D11): gate enables of the selected group; group 15 bits 1..6 are this
   // module's gates (bit 1: u_cg_pins, always on; scripts/dft/icg_map.py). 0 in normal mode.
-  wire [7:0] dbg_obs = core_obs |
-                       ({8{dbg_top}} & {1'b0, en_out, en_cfgd, en_cfga, ld_data, ld_frame, 2'b10});
+  // ld_frame / ld_data toggle with the strobes even when idle: isolated by a fixed and2 at the
+  // source, so in mode 0 only that cell's input loads them (preview: a max-cap buffer on
+  // ld_frame toggled at +0.2 uW idle without it).
+  wire obs_frm, obs_dat;
+  nlc_dft_and u_obs_frm (.a(ld_frame), .en(dbg_top), .y(obs_frm));
+  nlc_dft_and u_obs_dat (.a(ld_data),  .en(dbg_top), .y(obs_dat));
+  wire [7:0] dbg_obs = core_obs | {4'b0, obs_dat, obs_frm, 2'b00} |
+                       ({8{dbg_top}} & {1'b0, en_out, en_cfgd, en_cfga, 4'b0010});
   nlc_greg #(.W(8)) u_out (.clk(clk), .en(en_out),
                            .d(rb_mode ? cfg_rdata : dbg_icg ? dbg_obs : m_data), .q(data_q));
 
