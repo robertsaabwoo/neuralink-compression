@@ -101,18 +101,3 @@ module nlc_rreg #(
     end
   endgenerate
 endmodule
-
-// nlc_dft_and: y = a & en, as a fixed cell (synthesis keeps it where it is instantiated), so a
-// DFT observation of a net that toggles in normal operation loads that net with one and2 input
-// and the observation wiring behind it stays at 0 while en = 0 (D11, mode 0 power).
-module nlc_dft_and (
-    input  wire a,
-    input  wire en,
-    output wire y
-);
-`ifdef SYNTHESIS
-  sky130_fd_sc_hd__and2_1 u_and (.A(a), .B(en), .X(y));
-`else
-  assign y = a & en;
-`endif
-endmodule
