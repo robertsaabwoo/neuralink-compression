@@ -60,11 +60,13 @@ module nlc_encoder #(
     output wire                 m_last,     // with m_valid: the byte ends a packet
     output wire                 m_abort,    // abort token, one clock, m_valid = 0 (D5/D7)
     output wire                 overflow,   // sticky: the coder fell a frame behind
-    output wire                 busy        // needs clock edges while enable = 0
+    output wire                 busy,       // needs clock edges while enable = 0
+    input  wire [15:0]          dbg_hot,    // DFT (D11): one-hot gate group, 0 in normal mode
+    output wire [7:0]           dbg_obs     // this block's gate enables in that group
 );
 
   wire       ly_valid, ly_last, ly_abort;
-  wire [7:0] ly_data;
+  wire [7:0] ly_data, ly_obs;
   reg        tok, in_pkt, en_q;              // token owed, consumer holds part of a packet
   assign busy = en_q || tok;                 // the edge after enable falls, the token
 
@@ -73,7 +75,8 @@ module nlc_encoder #(
       .smp_valid(smp_valid), .smp_data(smp_data), .smp_ch(smp_ch), .smp_last(smp_last),
       .smp_tick(smp_tick), .smp_short(smp_short),
       .m_valid(ly_valid), .m_data(ly_data), .m_last(ly_last),
-      .overflow(overflow), .abort_req(ly_abort)
+      .overflow(overflow), .abort_req(ly_abort),
+      .dbg_hot(dbg_hot), .dbg_obs(ly_obs)
   );
 
   // the byte stream straight from the serialiser (its state is registered); the
@@ -87,7 +90,10 @@ module nlc_encoder #(
   wire in_pkt_nx = m_valid ? !ly_last : in_pkt;
   wire tok_set   = in_pkt_nx && (ly_abort || (en_q && !enable));
   wire gclk;
-  nlc_icg u_cg (.clk(clk), .en(m_valid || tok || tok_set || (enable != en_q)), .gclk(gclk));
+  wire cg_en = m_valid || tok || tok_set || (enable != en_q);
+  nlc_icg u_cg (.clk(clk), .en(cg_en), .gclk(gclk));
+  // gate group 13 bit 2 (scripts/dft/icg_map.py)
+  assign dbg_obs = ly_obs | ({8{dbg_hot[13]}} & {5'd0, cg_en, 2'b00});
   always @(posedge gclk or negedge rst_n) begin
     if (!rst_n) begin
       tok    <= 1'b0;

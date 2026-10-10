@@ -271,7 +271,7 @@ def step_rtl(r: Run) -> None:
         summary[name] = f"{sum(ok for _, ok in res)}/{len(res)}"
         r.failed_tests += [f"rtl {name}: {n}" for n, ok in res if not ok]
     r.sh("python scripts/gen_vectors.py --out test/vectors", "rtl_top_vectors.log")
-    res = cocotb_parallel(r, ROOT / "test", "rtl_top", "test_plumbing,test_modes,test_abort")
+    res = cocotb_parallel(r, ROOT / "test", "rtl_top", "test_plumbing,test_modes,test_abort,test_dft")
     for n, ok in res:
         if not ok and n in PENDING_TESTS:
             r.pending_tests.append(n)
@@ -529,11 +529,14 @@ def step_gl(r: Run) -> None:
     def gl_top():
         if not top_net.exists():
             return None
-        # test_lossy + test_abort_* (abort token, T-ROB-2/4 at the pins); make cannot take
-        # a `|` in the filter, hence the character classes
-        return _cocotb(r, ROOT / "test", "gl_top.log",
-                       f"GATES=local NETLIST={top_net} CLK_NS={OP['clock_period_ns']} "
-                       "COCOTB_TEST_FILTER='test_[la][ob]'")
+        res = []
+        # T-IF-4 + test_abort_* (abort token, T-ROB-2/4 at the pins), then the DFT modes
+        # T-IF-8/9: two runs, make cannot take a `|` in the filter
+        for log, filt in [("gl_top.log", "test_[la][ob]"), ("gl_top_dft.log", "t_if_[89]_")]:
+            res += _cocotb(r, ROOT / "test", log,
+                           f"GATES=local NETLIST={top_net} CLK_NS={OP['clock_period_ns']} "
+                           f"COCOTB_TEST_FILTER='{filt}'")
+        return res
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         top_res = pool.submit(gl_top)

@@ -15,14 +15,14 @@ item is an OpenROAD clock-tree bug on the final RTL (below).
 |---|---|---|
 | compression | 2.09 bits/sample, 18.0 dB median SNR | pass |
 | power | 34.8 uW running, 9.5 uW idle: routed, real data, signed off on the pre-area-round RTL (e13); the 3x2 build before the test-access pins: 34.7 / 9.4 uW in a post-CTS preview on synthetic data. Was 629 uW before clock gating | under the 40 uW limit, over the 16 uW target |
-| area | 48,500 um^2 of cells (from 128,000); 3x2 tiles, ~55% utilisation | pass; 2x2 does not route at 8 channels |
+| area | 50,000 um^2 of cells (from 128,000; +1,460 for the debug modes); 3x2 tiles, ~56% utilisation | pass; 2x2 does not route at 8 channels |
 | timing | +129 ns setup slack at 200 ns (slow corner) | pass |
 | throughput | one ADC slot per clock; no input data can make it drop a packet at the real 256-clock frame (proof, +138 clocks of slack; RTL test T-BW-3: worst-case data, 6/6 pass) | pass |
 | tests | model, RTL, core and gate-level suites pass; signed-off GDS for the 3x2 build without the test-access pins | final RTL: placement density 64 avoids the CTS bug (F27); sign-off run pending |
 
 Open items (detail in [docs/results.md](docs/results.md)):
 - OpenROAD CTS left one clock gate without its clock pin at placement density 60 (F27); density
-  64 avoids it (all 126 gates connected), the root cause in OpenROAD is not known;
+  64 avoids it (all 126, now 127, gates connected), the root cause in OpenROAD is not known;
 - processing latency is 1.85 ms, set by the wavelet look-ahead (F1). It is not observable at the
   pins (packets decode whole, 13.4 ms); the challenge's "< 1 ms" is read as real-time
   throughput, which the chip guarantees (C-LAT-1, C-IF-9).
@@ -62,7 +62,7 @@ on synthetic data instead and print a `NO REAL DATA` warning; CI is synthetic on
 |---|---|
 | [docs/platform.md](docs/platform.md) | the environment the chip lives in: Neuralink's architecture, Tiny Tapeout limits |
 | [docs/architecture.md](docs/architecture.md) | how the RTL is built, what it costs, where to change what |
-| [docs/constraints.md](docs/constraints.md) | requirements (C-*) and decisions D1-D10 |
+| [docs/constraints.md](docs/constraints.md) | requirements (C-*) and decisions D1-D11 |
 | [docs/testing.md](docs/testing.md) | how to run, test inventory, verification plan (T-*) |
 | [docs/results.md](docs/results.md) | findings, budgets, measured data |
 | [docs/budgets.md](docs/budgets.md) | where each pass/fail number comes from |

@@ -27,7 +27,9 @@ module nlc_slot_sel #(
     output wire                 smp_first,  // channel 0 of a frame
     output wire                 smp_last,   // channel n_sel-1 of a frame
     output reg                  smp_tick,   // a new frame started (s_frame), not the first
-    output reg                  smp_short   // with smp_tick: the frame that ended was short
+    output reg                  smp_short,  // with smp_tick: the frame that ended was short
+    input  wire [15:0]          dbg_hot,    // DFT (D11): one-hot gate group, 0 in normal mode
+    output wire [7:0]           dbg_obs     // this block's gate enables in that group
 );
 
   reg             running;
@@ -51,11 +53,17 @@ module nlc_slot_sel #(
   wire clr_n = rst_n && enable;
   wire take  = s_valid && (hit || s_frame);
   wire gclk_s, gclk_h;
-  nlc_icg u_cg_s (.clk(clk), .en(clr_n && s_valid),              .gclk(gclk_s));
-  nlc_icg u_cg_h (.clk(clk), .en(clr_n && (take || smp_valid || smp_tick)), .gclk(gclk_h));
+  wire en_s   = clr_n && s_valid;
+  wire en_h   = clr_n && (take || smp_valid || smp_tick);
+  wire en_smp = clr_n && s_valid && hit;
+  nlc_icg u_cg_s (.clk(clk), .en(en_s), .gclk(gclk_s));
+  nlc_icg u_cg_h (.clk(clk), .en(en_h), .gclk(gclk_h));
+
+  // gate group 13, bits 3..5 (scripts/dft/icg_map.py)
+  assign dbg_obs = {8{dbg_hot[13]}} & {2'b00, en_smp, en_h, en_s, 3'b000};
 
   nlc_greg #(.W(ADC_BITS + SEL_W + 2)) u_smp (
-      .clk(gclk_h), .en(clr_n && s_valid && hit),
+      .clk(gclk_h), .en(en_smp),
       .d({s_data, idx[SEL_W-1:0], idx == 0, idx + 1'b1 == n_sel}),
       .q({smp_data, smp_ch, smp_first, smp_last}));
 

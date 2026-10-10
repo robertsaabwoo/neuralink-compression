@@ -56,7 +56,7 @@ endif
 COMPILE_ARGS += -I$(SRC_DIR) -g2012
 VERILOG_SOURCES += $(CURDIR)/tb.v
 TOPLEVEL = tb
-COCOTB_TEST_MODULES = test_plumbing,test_modes,test_abort
+COCOTB_TEST_MODULES = test_plumbing,test_modes,test_abort,test_dft
 
 include $(shell cocotb-config --makefiles)/Makefile.sim
 

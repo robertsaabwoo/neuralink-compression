@@ -52,7 +52,9 @@ module nlc_rans #(
     input  logic                   m_tready,
     output logic [8*(RAW_B+2)-1:0] m_tdata,    // first byte in [7:0]
     output logic [RAW_B+1:0]       m_tkeep,    // contiguous from bit 0
-    output logic                   m_tlast
+    output logic                   m_tlast,
+    input  logic [15:0]            dbg_hot,    // DFT (D11): one-hot gate group, 0 normally
+    output logic [7:0]             dbg_obs     // this block's gate enables in that group
 );
 
   localparam int F_W  = PB + 1;               // f_s
@@ -163,15 +165,18 @@ module nlc_rans #(
   // symbol starts in a fire cycle: a_v needs !it_v) and takes wb_x at fire; without it,
   // a separate staging register does.
   logic [X_W-1:0] wb_sg;                      // the state row's data
+  logic           en_xl;                      // u_xl's gate enable (DFT)
   generate
     if (LOOP) begin : g_loop
       logic xl_wb;                            // x_l stages the write-back
       assign xl_wb = LATCH_ROWS && fire;
-      nlc_greg #(.W(X_W)) u_xl (.clk(clk), .en(rst_n && (start || (it_v && it_c != '0) || xl_wb)),
+      assign en_xl = rst_n && (start || (it_v && it_c != '0) || xl_wb);
+      nlc_greg #(.W(X_W)) u_xl (.clk(clk), .en(en_xl),
                                 .d(xl_wb ? wb_x : {l_rem[DK][PB-1:0], l_dq[DK]}), .q(x_l));
       assign wb_sg = LATCH_ROWS ? x_l : wb_x;
     end else begin : g_noloop
-      assign x_l = '0;
+      assign x_l   = '0;
+      assign en_xl = 1'b0;                    // gate group 13 bit 0 observes u_xl only
       if (LATCH_ROWS) begin : g_sg
         nlc_greg #(.W(X_W)) u_wb (.clk(clk), .en(rst_n && fire), .d(wb_x), .q(wb_sg));
       end else begin : g_nosg
@@ -215,13 +220,20 @@ module nlc_rans #(
                                     .q({o_data, o_keep}));
 
   // channel state rows: gated, written by the symbol's last divide cycle (from wb_sg)
+  logic [N_CH-1:0] en_st;
   genvar gc;
   generate
     for (gc = 0; gc < N_CH; gc++) begin : g_st
+      assign en_st[gc] = rst_n && fire && s_tchan == CH_W'(gc);
       nlc_rreg #(.W(X_W), .LATCH(LATCH_ROWS)) u_st (
-          .clk(clk), .en(rst_n && fire && s_tchan == CH_W'(gc)), .d(wb_sg), .q(st_mem[gc]));
+          .clk(clk), .en(en_st[gc]), .d(wb_sg), .q(st_mem[gc]));
     end
   endgenerate
+
+  // DFT (D11, scripts/dft/icg_map.py): state rows = group 11 (bit = channel), u_cg_c =
+  // group 12 bit 7, u_xl / u_o = group 13 bits 0 / 1. dbg_hot is 0 in normal mode.
+  assign dbg_obs = ({8{dbg_hot[11]}} & 8'(en_st)) | ({8{dbg_hot[12]}} & {active, 7'd0}) |
+                   ({8{dbg_hot[13]}} & {6'd0, o_we, en_xl});
 
   // ---------------------------------------------------------------------------
   // Control

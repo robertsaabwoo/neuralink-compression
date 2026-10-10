@@ -1,7 +1,7 @@
 # Architecture (as built, 2026-10-10)
 
 What the RTL does today (branch `area4-final-3x2`, RTL a0966c0). Requirements:
-[constraints.md](constraints.md) (decisions D1-D10). Numbers: [results.md](results.md).
+[constraints.md](constraints.md) (decisions D1-D11). Numbers: [results.md](results.md).
 
 ```
  TT pins ─► project.v ─► nlc_core ──────────────────────────────────────────────► TT pins
@@ -26,11 +26,13 @@ pin reaches a gate enable; the stage-1 MTBF argument is in `project.v`). A strob
 10-bit sample (`ui_in` + `uio[1:0]`, `s_frame` = slot 0), or a config byte (address, then
 data) while `cfg_en` = 1. Output: byte on `uo_out`, `m_valid`/`m_last` on `uio[6]/[7]`, all
 from one output register stage (+1 clock; D8: no ack). Test access: sticky `overflow` on
-`uio[4]`; config readback on `uo_out` while `cfg_en` = 1 and `CTRL.enable` = 0 (C-IF-12). The
-pin path manages one sample per 2 clocks at most: a test-access mode below the D9 rate (C-IF-9).
+`uio[4]`; config readback on `uo_out` while `cfg_en` = 1 and `CTRL.enable` = 0 (C-IF-12);
+debug modes (below). The pin path manages one sample per 2 clocks at most: a test-access mode
+below the D9 rate (C-IF-9).
 
 **`nlc_cfg`.** Registers: enable (CTRL[7]; the mode bits CTRL[1:0] are ignored, lossy only),
-`n_sel` (1-8), slot per channel (ascending), and a read mux for the readback. `enable` = 0
+`n_sel` (1-8), slot per channel (ascending), `DBG` (0x08, D11; written only while disabled),
+and a read mux for the readback. `enable` = 0
 clears the core. The slot registers are gated storage without reset, read through one
 shared slot mux. The registers of the model-only modes 0/2/3 were removed (2026-10-08).
 
@@ -103,12 +105,55 @@ with `m_valid` = 0 for one clock.
 **Output (D8).** No output FIFO: the serialiser drives the byte stream directly, one byte per
 clock while `m_valid`, `m_abort` for one clock. The TT top registers it once.
 
+**DFT debug modes (D11, `DBG` = 0x08: [1:0] mode, [7:4] group).** No free pins, so the modes
+reuse the output pins. Mode 0 (reset) is normal operation: every debug signal derives from the
+static `DBG` flops, so in mode 0 the selects are constant, the observation AND gates output 0
+and the raw-bypass flops sit behind their own closed gate (only the AND gates' input pins load
+the gate-enable nets).
+- *Mode 1, raw bypass (C-IF-13):* `nlc_core` gives the encoder `enable && !dbg_raw`, so the
+  codec stays cleared with no clock edge, and drives `m_*` from the slot selector's sample
+  register: `{6'b0, s[9:8]}` in the clock of `smp_valid`, `s[7:0]` the clock after (flop
+  `raw_lo`), `m_last` with the low byte of `smp_last`. The selector holds the sample until its
+  next hit (>= 2 clocks on the pin path). A hit in the low byte's clock (adjacent selected slots
+  at one slot per clock) wins and sets the sticky `raw_ovf` on `uio[4]`. Cost: 2 flops, 1 gate.
+- *Mode 2, gate observation (C-IF-14):* every block ANDs its gate enables with a one-hot
+  group select (`dbg_hot`, decoded once in `nlc_cfg`, 0 unless mode 2) and ORs them into an
+  8-bit `dbg_obs`; the blocks' results are ORed up to the TT top, which loads them into the
+  existing output register (`u_out`, gate on `clk`, open every clock in mode 2): no new flops.
+  `uo_out` bit b = gate b's enable at the edge that loaded it, i.e. whether that gate's latch
+  passed that edge (if its parents' did too). It observes the enable net, not the gate cell
+  or the clock tree: the F27 failure (a `dlclkp` with no CLK) would not show. Groups are cut
+  along the RTL's own vectors (a wavelet row across the 8 channels, the 8 coder states, the 8
+  slot registers), so each block muxes locally and only 8 wires per block travel to the top.
+
+Gate map (`python scripts/dft/icg_map.py`; `--netlist` checks a netlist against it, T-IF-9
+checks the RTL against it every clock):
+
+| group | gates (`en` of), bit 0 first | parent clock |
+|---|---|---|
+| 0 | `core.u_enc.u_lossy.g_ch[b].u_sx` (b = channel) | `core.u_enc.u_lossy.clk_s` |
+| 1 | `core.u_enc.u_lossy.g_ch[b].u_e1` (b = channel) | `core.u_enc.u_lossy.clk_i` |
+| 2 | `core.u_enc.u_lossy.g_ch[b].u_o1` (b = channel) | `core.u_enc.u_lossy.clk_i` |
+| 3 | `core.u_enc.u_lossy.g_ch[b].u_dp1` (b = channel) | `core.u_enc.u_lossy.clk_i` |
+| 4 | `core.u_enc.u_lossy.g_ch[b].u_e2` (b = channel) | `core.u_enc.u_lossy.clk_i` |
+| 5 | `core.u_enc.u_lossy.g_ch[b].u_o2` (b = channel) | `core.u_enc.u_lossy.clk_i` |
+| 6 | `core.u_enc.u_lossy.g_ch[b].u_dp2` (b = channel) | `core.u_enc.u_lossy.clk_i` |
+| 7 | `core.u_enc.u_lossy.g_ch[b].u_e3` (b = channel) | `core.u_enc.u_lossy.clk_i` |
+| 8 | `core.u_enc.u_lossy.g_ch[b].u_o3` (b = channel) | `core.u_enc.u_lossy.clk_i` |
+| 9 | `core.u_enc.u_lossy.g_ch[b].u_dp3` (b = channel) | `core.u_enc.u_lossy.clk_i` |
+| 10 | `core.u_enc.u_lossy.g_ch[b].u_qa` (b = channel) | `core.u_enc.u_lossy.clk_i` |
+| 11 | `core.u_enc.u_lossy.u_rans.g_st[b].u_st` (b = channel) | `core.u_enc.u_lossy.clk_l` |
+| 12 | `core.u_enc.u_lossy.` 0: `u_cg_l`, 1: `u_cg_s`, 2: `u_cg_i`, 3: `u_x`, 4: `g_sg.u_sg`, 5: `g_sg.u_sgx`, 6: `u_cg_o`, 7: `u_rans.u_cg_c` | `core.clk_core`, `core.u_enc.u_lossy.clk_i`, `core.u_enc.u_lossy.clk_l`, `core.u_enc.u_lossy.clk_s` |
+| 13 | `core.` 0: `u_enc.u_lossy.u_rans.g_loop.u_xl`, 1: `u_enc.u_lossy.u_rans.u_o`, 2: `u_enc.u_cg`, 3: `u_sel.u_cg_s`, 4: `u_sel.u_cg_h`, 5: `u_sel.u_smp`, 6: `u_cg_core`, 7: `u_cg_raw` | `clk`, `core.clk_core`, `core.u_enc.u_lossy.clk_l`, `core.u_sel.gclk_h` |
+| 14 | `core.u_cfg.g_slot[b].u_slot` (b = channel) | `clk` |
+| 15 | 0: `core.u_cfg.u_cg`, 1: `u_cg_pins`, 2: `u_cg_frm`, 3: `u_cg_dat`, 4: `u_cfg_addr`, 5: `u_cfg_data`, 6: `u_out`, 7: - | `clk` |
+
 ## Cost today
 
 | | value |
 |---|---|
-| area | TT top 48,518 um^2 synth (the lossy core alone was 128,000 um^2 on 2026-10-07); 3x2 tiles, post-CTS utilisation 0.553 (D10) |
-| storage | 337 flops + per-channel latch rows + 126 clock gates (TT top) |
+| area | TT top 49,979 um^2 synth, of which DFT modes +1,461 (F28) (the lossy core alone was 128,000 um^2 on 2026-10-07); 3x2 tiles, post-CTS utilisation 0.560 (D10) |
+| storage | 346 flops + per-channel latch rows + 127 clock gates (TT top) |
 | state per channel | 146 b: 124 sample/wavelet + 22 coder (Neuralink spike path: 226 b/ch) |
 | timing | +129.0 ns setup slack at ss / 200 ns, +0.187 ns hold at ff (pre-layout); latch D pins excluded from place-and-route setup repair (`src/pnr.sdc`, results.md F24) |
 | power | routed, real data, signed off (e13 RTL, before the area round): 34.8 uW running / 9.5 uW idle for the TT top, core 23.8 / 0.80. Final RTL: preview only, synthetic data (results.md, Budgets) |
@@ -125,5 +170,6 @@ F27); the definition of processing latency (F1).
 | D6/D7 abort, resume, token | abort/skip/resume in `nlc_lossy.sv`, token in `nlc_encoder.v`, `m_abort` on `nlc_core`, pins in `project.v` | T-IF-3, T-ROB-2/3/4/7 |
 | throughput (D9) | coder speed `DIV_K` in `nlc_lossy.sv` / `nlc_rans.sv`; output rate in the serialiser | T-BW-3, `scripts/proofs/output_bound.py` |
 | pins, CDC, test access | `project.v` (synchronisers, output register, overflow pin), readback mux in `nlc_cfg.v` | `test/` (T-IF-4/6/7), STA recovery |
+| DFT debug modes (D11) | `DBG` in `nlc_cfg.v`; raw bypass in `nlc_core.v`; `dbg_obs` terms in every block; adding, removing or renaming a clock gate: update `scripts/dft/icg_map.py` and that block's `dbg_obs` | `test/test_dft.py` (T-IF-8/9), `icg_map.py --netlist` on the synthesised netlist |
 | place and route | `src/config.json` (LibreLane), `src/pnr.sdc` (latch D pins out of setup repair), `info.yaml` tiles | `cts_preview`, `gds` on GitHub |
 | power (clock gating) | `nlc_icg.sv`; parent gates and `nlc_greg` rows in `nlc_lossy.sv`, `nlc_rans.sv` | everything + `nlc.py power` (fails if an activity annotation is lost) |

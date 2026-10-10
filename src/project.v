@@ -27,6 +27,17 @@
 //   rst_n            async assert, synchronous release (2-flop reset synchroniser)
 // All outputs come straight from flops (one output register stage).
 //
+// DFT debug modes (D11; register DBG = 0x08, written while CTRL.enable = 0; nlc_core.v):
+//   DBG[1:0] = 0  normal: compressed packets (bit-exact, the debug logic is static)
+//            = 1  raw bypass: while enabled, uo_out/m_valid/m_last carry the selected
+//                 channels' samples, per frame and channel in slot order {6'b0, s[9:8]},
+//                 s[7:0], m_last on the last byte of the frame; the codec is held cleared
+//            = 2  clock-gate observation: m_valid = 1 every clock (enabled or not), uo_out =
+//                 the enables of the 8 clock gates of group DBG[7:4] (scripts/dft/icg_map.py),
+//                 bit b = gate b's enable at the clock edge that loaded uo_out; m_last = 0.
+//                 Config readback still takes uo_out (m_valid = 0 then)
+//            = 3  reserved (normal)
+//
 // Output (decision D8, valid-only streaming): one byte per clock while m_valid, the abort
 // token for one clock; the host must capture every clock (nothing can stall the output,
 // like the merge circuitry / serializer of an implant).
@@ -119,6 +130,8 @@ module tt_um_nlc_compressor (
   // Power (F19/F20): the frame flag loads on every slot (the slot selector reads it on every
   // strobe); the sample / config byte only on a selected slot (s_want, registered state of the
   // slot selector, valid for the next strobe), a frame slot or a config strobe.
+  wire       dbg_icg, dbg_top;        // from the core: DFT mode 2, group 15 (D11)
+  wire [7:0] core_obs;
   wire stb_rise = stb_q[0] & ~stb_q[1];
   wire ld_frame = !rst_s || stb_rise;
   wire ld_data  = !rst_s || (stb_rise && (cfg_q[0] || frm_q || s_want));
@@ -152,8 +165,10 @@ module tt_um_nlc_compressor (
   wire [7:0] cfg_data;
   wire       cfg_strobe = rst_s & cfg_en & strobe;
 
-  nlc_greg #(.W(8)) u_cfg_addr (.clk(clk), .en(cfg_strobe & ~have_addr), .d(ui_q), .q(cfg_addr));
-  nlc_greg #(.W(8)) u_cfg_data (.clk(clk), .en(cfg_strobe &  have_addr), .d(ui_q), .q(cfg_data));
+  wire       en_cfga = cfg_strobe & ~have_addr;
+  wire       en_cfgd = cfg_strobe &  have_addr;
+  nlc_greg #(.W(8)) u_cfg_addr (.clk(clk), .en(en_cfga), .d(ui_q), .q(cfg_addr));
+  nlc_greg #(.W(8)) u_cfg_data (.clk(clk), .en(en_cfgd), .d(ui_q), .q(cfg_data));
 
   always @(posedge clk_pins) begin
     if (!rst_s) begin
@@ -183,18 +198,25 @@ module tt_um_nlc_compressor (
       .s_valid(strobe & ~cfg_en), .s_frame(frame_q), .s_data({hi_q, ui_q}), .s_want(s_want),
       .cfg_we(cfg_we), .cfg_addr(cfg_addr), .cfg_data(cfg_data),
       .m_data(m_data), .m_valid(m_valid), .m_last(m_last), .m_abort(m_abort),
-      .enabled(enabled), .cfg_rdata(cfg_rdata), .overflow(overflow)
+      .enabled(enabled), .cfg_rdata(cfg_rdata), .overflow(overflow),
+      .dbg_icg(dbg_icg), .dbg_top(dbg_top), .dbg_obs(core_obs)
   );
 
   // Output register stage: the pads see flop outputs only (+1 clock of latency). The byte
-  // loads only with m_valid or in config readback (its own gate; no reset, read only with
-  // m_valid / in readback); the flags run on the always-on pin clock. Readback needs
-  // enable = 0, so m_valid = 0 then (the two never share the register).
+  // loads only with m_valid, in config readback or in DFT mode 2 (its own gate, on clk: in
+  // mode 2 it loads every clock; no reset, read only with m_valid / in readback); the flags
+  // run on the always-on pin clock. Readback needs enable = 0, so m_valid = 0 then (the two
+  // never share the register); readback takes priority over mode 2.
   wire       rb_mode = cfg_en & have_addr & ~enabled;
+  wire       en_out  = m_valid | rb_mode | dbg_icg;
   reg        valid_q, last_q, ovf_q;
   wire [7:0] data_q;
-  nlc_greg #(.W(8)) u_out (.clk(clk), .en(m_valid | rb_mode),
-                           .d(rb_mode ? cfg_rdata : m_data), .q(data_q));
+  // DFT mode 2 (D11): gate enables of the selected group; group 15 bits 1..6 are this
+  // module's gates (bit 1: u_cg_pins, always on; scripts/dft/icg_map.py). 0 in normal mode.
+  wire [7:0] dbg_obs = core_obs |
+                       ({8{dbg_top}} & {1'b0, en_out, en_cfgd, en_cfga, ld_data, ld_frame, 2'b10});
+  nlc_greg #(.W(8)) u_out (.clk(clk), .en(en_out),
+                           .d(rb_mode ? cfg_rdata : dbg_icg ? dbg_obs : m_data), .q(data_q));
 
   always @(posedge clk_pins) begin
     if (!rst_s) begin
@@ -202,8 +224,8 @@ module tt_um_nlc_compressor (
       last_q  <= 1'b0;
       ovf_q   <= 1'b0;
     end else begin
-      valid_q <= m_valid;
-      last_q  <= m_abort | m_last;              // core: m_last implies m_valid
+      valid_q <= dbg_icg ? ~rb_mode : m_valid;
+      last_q  <= ~dbg_icg & (m_abort | m_last); // core: m_last implies m_valid
       ovf_q   <= overflow;
     end
   end

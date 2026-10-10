@@ -66,6 +66,7 @@ async def reset(dut, n_sel=N_SEL):
     dut.smp_last.value = 0
     dut.smp_tick.value = 0
     dut.smp_short.value = 0
+    dut.dbg_hot.value = 0                  # DFT gate observation off (D11)
     await ClockCycles(dut.clk, 3)
     dut.rst_n.value = 1
     dut.enable.value = 1
