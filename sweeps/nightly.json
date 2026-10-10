@@ -1,11 +1,12 @@
 {
-  "_doc": "Nightly sweep, see .github/workflows/nightly.yaml and scripts/ci/nightly_apply.py. Example: the design on main through TT's full flow and a post-CTS preview, plus a long RTL regression. Power in CI is on synthetic data (the dataset is not public).",
+  "_doc": "2026-10-10: DFT build (integration-dft) died in post-GRT repair at density 64 (GRT-0183 heap underflow in 3D maze routing, OpenROAD). Full flow with the same patched CTS as the gds workflow at other placement densities.",
   "sweep": [
-    {"name": "main-full", "ref": "main", "flow": "full", "noid": false},
-    {"name": "main-preview", "ref": "main", "flow": "preview", "noid": false}
+    {"name": "dft-d60", "ref": "integration-dft", "flow": "full", "noid": true, "config": {"PL_TARGET_DENSITY_PCT": 60}},
+    {"name": "dft-d62", "ref": "integration-dft", "flow": "full", "noid": true, "config": {"PL_TARGET_DENSITY_PCT": 62}},
+    {"name": "dft-d66", "ref": "integration-dft", "flow": "full", "noid": true, "config": {"PL_TARGET_DENSITY_PCT": 66}},
+    {"name": "dft-d68", "ref": "integration-dft", "flow": "full", "noid": true, "config": {"PL_TARGET_DENSITY_PCT": 68}}
   ],
   "rtl": [
-    {"name": "main-rob1-long", "ref": "main", "filter": "t_rob_1", "env": "NLC_LONG=1"},
-    {"name": "main-rob6", "ref": "main", "filter": "t_rob_6", "seeds": "1 2 3 4 5 6 7 8"}
+    {"name": "dft-rob6", "ref": "integration-dft", "filter": "t_rob_6", "seeds": "1 2 3 4 5 6"}
   ]
 }
