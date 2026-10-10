@@ -23,7 +23,11 @@
 // would overwrite the one not yet lifted).
 //
 // Requirements: frames are long enough to absorb the packet flush (about
-// coder depth + 3 * N_SEL * SB / 2 cycles; depth 2, or up to Q_W + 3 with DIV_REG), e.g. a 256-slot mux at one slot per clock.
+// 3 * N_SEL * SB / 2 cycles) and a 4-symbol burst on every channel in two frames in a row
+// (block positions 62, 63): 4 * N_SEL symbols at NC = ceil(10 / DIV_K) clocks each within
+// one frame, e.g. a 256-slot mux at one slot per clock. 64-clock frames (C-IF-9) with
+// N_SEL = 8 need NC <= 2, i.e. DIV_K >= 5. The issuer holds its symbol (and the state it
+// was lifted from: writes happen only when the coder takes it) for the NC clocks.
 // enable = 0 clears everything; the next packet is seq 0.
 //
 // Abort (D5/D6): when the coder falls more than a frame behind (a burst would be
@@ -38,7 +42,7 @@ module nlc_lossy #(
     parameter int N_SEL = 8,
     parameter int SEL_W = 3,
     parameter int BPP_W = 2,      // 2^BPP_W blocks of 64 frames per packet
-    parameter int   DIV_REG = 0      // coder divider registers (11-bit mask), see nlc_rans
+    parameter int DIV_K = 5           // coder: quotient bits per clock (>= 10: one symbol/clock), see nlc_rans
 ) (
     input  logic             clk,
     input  logic             rst_n,
@@ -368,7 +372,7 @@ module nlc_lossy #(
   logic [31:0] c_data;
   logic [3:0]  c_keep;
 
-  nlc_rans #(.N_CH(N_SEL), .CH_W(SEL_W), .DIV_REG(11'(DIV_REG))) u_rans (
+  nlc_rans #(.N_CH(N_SEL), .CH_W(SEL_W), .DIV_K(DIV_K)) u_rans (
       .clk(clk_l), .rst_n(clr_n && !skip), .active(c_active),
       .s_tvalid(r_valid), .s_tready(r_ready), .s_tdata(hsym), .s_tctx(hctx),
       .s_tchan(rr_iss), .s_traw_v(is_esc), .s_traw(hraw), .s_tlast(r_last),
