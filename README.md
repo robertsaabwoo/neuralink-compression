@@ -66,6 +66,7 @@ on synthetic data instead and print a `NO REAL DATA` warning; CI is synthetic on
 | [docs/testing.md](docs/testing.md) | how to run, test inventory, verification plan (T-*) |
 | [docs/results.md](docs/results.md) | findings, budgets, measured data |
 | [docs/budgets.md](docs/budgets.md) | where each pass/fail number comes from |
+| [docs/bringup.md](docs/bringup.md) | first silicon: board capture -> diagnose.py -> faulty block / cell; validation |
 
 ## Layout
 
