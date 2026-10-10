@@ -250,7 +250,7 @@ Aborts are covered by T-IF-3, T-ROB-2/4/7 and the overflow pin by T-IF-7.
 |---|---|---|---|---|
 | T-LINT-1 | Verilator lint: lossy core `-Wall`, TT top errors | 0 errors | C-RTL-1 | exists |
 | T-GL-1 | Lossy core netlist (sky130 cells) runs `test/lossy` at 200 ns | bit-exact | C-FN-5, C-RTL-2 | exists |
-| T-GL-2 | **TT top** netlist (like TT's `gl_test`) runs T-IF-4, T-IF-5 , the abort paths (`test_abort`) and T-IF-8/9 (9: idle part) | bit-exact | C-FN-5, C-TIM-4 | exists, pass (Yosys netlist, `GATES=local`) |
+| T-GL-2 | **TT top** netlist (like TT's `gl_test`) runs T-IF-4, T-IF-5, the abort paths (`test_abort`) and T-IF-8/9 (9: idle part) | bit-exact | C-FN-5, C-TIM-4 | exists, pass (Yosys netlist, `GATES=local`) |
 | T-GL-3 | Post-layout gate-level with SDF from the TT GDS action | bit-exact | C-FN-5, C-TIM-1 | new (after first GDS run) |
 | T-EQ-1 | RTL vs netlist equivalence (Yosys `equiv_*` or SymbiYosys) as a fast check next to T-GL-1 | proven equivalent | C-FN-5, C-RTL-2 | new |
 | T-FV-1 | Formal properties on the plumbing (SymbiYosys): slot selector emits each configured slot exactly once per frame, in order | proven (bounded) | C-IF-2/4 | new |
