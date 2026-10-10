@@ -1,12 +1,8 @@
 {
-  "_doc": "2026-10-10: DFT build (integration-dft) died in post-GRT repair at density 64 (GRT-0183 heap underflow in 3D maze routing, OpenROAD). Full flow with the same patched CTS as the gds workflow at other placement densities.",
+  "_doc": "2026-10-10: DFT build (integration-dft) crashed in post-GRT repair (GRT-0183 heap underflow in 3D maze routing) after GRT disabled the clock NDR to relieve local overflow. Config-only fixes: NDR on clock roots only; less routing derating.",
   "sweep": [
-    {"name": "dft-d60", "ref": "integration-dft", "flow": "full", "noid": true, "config": {"PL_TARGET_DENSITY_PCT": 60}},
-    {"name": "dft-d62", "ref": "integration-dft", "flow": "full", "noid": true, "config": {"PL_TARGET_DENSITY_PCT": 62}},
-    {"name": "dft-d66", "ref": "integration-dft", "flow": "full", "noid": true, "config": {"PL_TARGET_DENSITY_PCT": 66}},
-    {"name": "dft-d68", "ref": "integration-dft", "flow": "full", "noid": true, "config": {"PL_TARGET_DENSITY_PCT": 68}}
+    {"name": "dft-ndr-root", "ref": "integration-dft", "flow": "full", "noid": true, "config": {"CTS_APPLY_NDR": "root_only"}},
+    {"name": "dft-grtadj-0.2", "ref": "integration-dft", "flow": "full", "noid": true, "config": {"GRT_ADJUSTMENT": 0.2}}
   ],
-  "rtl": [
-    {"name": "dft-rob6", "ref": "integration-dft", "filter": "t_rob_6", "seeds": "1 2 3 4 5 6"}
-  ]
+  "rtl": []
 }
