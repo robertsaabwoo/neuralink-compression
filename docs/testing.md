@@ -12,6 +12,7 @@ Quick view of everything from a terminal: `python scripts/status.py`.
 | `python nlc.py sim` | model, lint, every RTL suite incl. `test/core` (`nlc_core` at the real interface) | ~45 min (`--quick`: T-IF only) |
 | `python nlc.py synth` / `sta` / `gate_sim` / `power` | area / timing / gate level (lossy core + TT top) / power scenarios | 3 / 1 / 10 / 25 min |
 | `python nlc.py layout` | routed design of the last GDS run (`scripts/fetch_gds.py`, needs `gh`): T-PWR-3 real-data power with the clock tree, T-FAN-1 buffer trees/slews (`reports/latest/layout_fanout.md`) | ~10 min |
+| `gh workflow run sdf_sim.yaml --ref <branch> -f run_id=<gds run> -f corner=nom_tt_025C_1v80` | T-GL-3 on GitHub: routed netlist + SDF of that `gds` run (any `final/sdf` corner), CVC (timing checks) and Icarus 13; job summary: tests, violations, clk->out delay, timing-check self-test | ~10 min |
 | `python nlc.py all` | everything (T2), scored against `scripts/flow/budgets.json` | ~1.5 h |
 | `python nlc.py report` | print `reports/latest/summary.md` | |
 | `python nlc.py accept` | accept the current bitstream as the golden reference (T-CHG-7) | |
@@ -110,8 +111,9 @@ power scenarios of 4.4 (`test_power_op/n4/worst/floor`), `gl_dump.v` takes `+vcd
 | 2026-10-09/10 | area experiments B (shared lifter), C (looped divider, DIV_K = 5), G (flow: drive-1 cells, hold margins, CTS buffers), glue, D8 (valid-only output), S3 (latch rows) stacked; CDC + DFT on the TT top (a0966c0) | final RTL: TT-top synth 48,518 um^2, 337 flops; lint 0, `test/` 5/5, `test/core` 40 pass / 0 fail, `test/lossy` 8/8, final-netlist gate level (TT top + lossy) pass, STA ss +129.0 ns, ff hold +0.187 ns; only flow FAIL was `latency_processing_us` 1,846 against the old 1 ms (F1; C-LAT-1 restated to the derived 2,253 us bound, now PASS); T-BW-3 6/6 (F22-F27) |
 | 2026-10-10 | 2x2 fit (gds runs on GitHub) | 8 channels do not route in 2x2 (F23); 3x2 and 4x2 signed off (gds, gl_test, precheck) for the stack and the pre-DFT all-in build |
 | 2026-10-10 | final candidate `area4-final-3x2` (a0966c0 in 3x2): latch pre-check (place-and-route SDC), `ENCODER=replay`; `cts_preview` | latch D endpoints chased: 0; replay 4 pass, 1 skip (overflow pin needs the real encoder); preview util 0.553, hold +0.250 ns, layout gate-level **fails: OpenROAD CTS left a clock gate without CLK (F27, open)** |
+| 2026-10-10 | T-GL-3: SDF gate level of routed designs (`sdf_sim` workflow, CVC + Icarus 13, 200 ns, inputs on the falling edge) | final c8fd3b5: bit-exact, readback + overflow pass, 0 timing-check violations at nom tt/ss/ff, max ss, min ff; checks shown live by `test_sdf`. F21's routed-sim failures: a clock gate without CLK in each netlist (F27), not unit-delay races (F28) |
 
-Findings F1-F27, budgets and the measured data: [results.md](results.md).
+Findings F1-F28, budgets and the measured data: [results.md](results.md).
 
 ## 4. Verification plan (testing phase)
 
@@ -249,7 +251,7 @@ Aborts are covered by T-IF-3, T-ROB-2/4/7 and the overflow pin by T-IF-7.
 | T-LINT-1 | Verilator lint: lossy core `-Wall`, TT top errors | 0 errors | C-RTL-1 | exists |
 | T-GL-1 | Lossy core netlist (sky130 cells) runs `test/lossy` at 200 ns | bit-exact | C-FN-5, C-RTL-2 | exists |
 | T-GL-2 | **TT top** netlist (like TT's `gl_test`) runs T-IF-4, T-IF-5 and the abort paths (`test_abort`) | bit-exact | C-FN-5, C-TIM-4 | exists, pass (Yosys netlist, `GATES=local`) |
-| T-GL-3 | Post-layout gate-level with SDF from the TT GDS action | bit-exact | C-FN-5, C-TIM-1 | new (after first GDS run) |
+| T-GL-3 | **Routed** netlist with SDF from the TT GDS action (real delays, timing checks), TT-top tests through the pins at 200 ns; `sdf_sim` workflow | bit-exact, 0 timing-check violations | C-FN-5, C-TIM-1 | exists, pass (c8fd3b5: nom tt/ss/ff, max ss, min ff; F28) |
 | T-EQ-1 | RTL vs netlist equivalence (Yosys `equiv_*` or SymbiYosys) as a fast check next to T-GL-1 | proven equivalent | C-FN-5, C-RTL-2 | new |
 | T-FV-1 | Formal properties on the plumbing (SymbiYosys): slot selector emits each configured slot exactly once per frame, in order | proven (bounded) | C-IF-2/4 | new |
 | T-STA-1 | OpenSTA: setup at ss, 200 ns; hold at ff; report Fmax at ss | C-TIM-1/2 | C-TIM-1/2/5 | extend (TT clock -> 200 ns) |
@@ -306,7 +308,7 @@ Must be hit across the regression (T-ROB-6 plus the directed tests), otherwise t
 | T0 quick | before every commit | `pytest` (incl. T-CHG-1..5, 7), lint, `test/lossy`, `test/` plumbing + lossy (`check.py --only model,lint,rtl --quick`) | < 3 min |
 | T1 CI | every push (GitHub `.github/workflows/model.yml` + TT `test.yaml`) | T0 + rANS suites + replay self-test + T-IF-* + T-INF-2 | < 15 min |
 | T2 full | before a design change is accepted; nightly while iterating | `python scripts/check.py`: everything above + GL + STA + area + power matrix + compression on held-out files + random regression (T-ROB-6, 50 seeds) | < 1 h |
-| T3 sign-off | per GDS run | TT `gds`, `gl_test`, precheck; then locally `python nlc.py layout` (T-PWR-3, T-FAN-1); T-GL-3 | TT action + ~10 min |
+| T3 sign-off | per GDS run | TT `gds`, `gl_test`, precheck; then locally `python nlc.py layout` (T-PWR-3, T-FAN-1); T-GL-3 (`sdf_sim` workflow, GitHub) | TT action + ~10 min |
 
 CI rules: A WARN never fails CI; a FAIL does. Every failing randomised test
 prints its seed and a one-line command that reproduces it.

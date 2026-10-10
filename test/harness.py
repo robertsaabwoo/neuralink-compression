@@ -29,7 +29,7 @@ CLK_NS = float(os.environ.get("CLK_NS", 200))          # D2: 5 MHz, the ADC slot
 # Pin path (C-IF-9): at most one slot every 2 clocks, frames >= 64 clocks (vectors: 32 slots)
 SLOT_CYCLES = int(os.environ.get("SLOT_CYCLES", 2))
 FLUSH_CLOCKS = 2000                                    # lossy: lag frames + packet flush
-GATES = os.environ.get("GATES") in ("yes", "local")   # gate level: no internal probes
+GATES = os.environ.get("GATES") in ("yes", "local", "sdf")   # gate level: no internal probes
 
 S_STROBE, S_FRAME, CFG_EN = 2, 3, 5        # uio[4]: overflow output (was m_ack; D8: no ack)
 
@@ -64,12 +64,14 @@ async def reset(dut) -> Pins:
     pins.set_uio(0xFF, 0)
     dut.rst_n.value = 0
     await ClockCycles(dut.clk, 10)
+    await FallingEdge(dut.clk)              # away from the active edge (real delays, T-GL-3)
     dut.rst_n.value = 1
     await ClockCycles(dut.clk, 2)
     return pins
 
 
 async def write_reg(pins: Pins, addr: int, data: int) -> None:
+    await FallingEdge(pins.dut.clk)         # every input changes on the falling edge
     pins.set_uio(1 << CFG_EN, 1 << CFG_EN)
     await pins.strobe(addr)
     await pins.strobe(data)
@@ -83,6 +85,7 @@ async def write_reg(pins: Pins, addr: int, data: int) -> None:
 async def read_reg(pins: Pins, addr: int) -> int:
     """Config readback (CTRL.enable = 0): cfg_en = 1, strobe the address, read uo_out, drop
     cfg_en without a data strobe (nothing is written)."""
+    await FallingEdge(pins.dut.clk)
     pins.set_uio(1 << CFG_EN, 1 << CFG_EN)
     await pins.strobe(addr)
     await ClockCycles(pins.dut.clk, 4)
