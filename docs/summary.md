@@ -25,11 +25,34 @@ Design: [architecture.md](architecture.md). Requirements and decisions: [constra
 |---|---|---|
 | compression | 2.09 bits/sample (4.8:1), median SNR 18.0 dB (10th percentile 13.3 dB), 160 held-out recordings | SNR, not spike-detection agreement; RTL bit-exact with the golden model |
 | throughput | II = 1: one slot per clock in every state; no input can make it drop a packet at 256-clock frames (proof: +138 clocks of slack, `scripts/proofs/output_bound.py --d8`; RTL test T-BW-3 on worst-case data) | output is not rate-capped: noise-like data codes at 21.4 bits/sample, above the raw rate; real data 2.1 |
-| power, routed, real data | compression core **24.5 uW** running / **0.6 uW** idle; whole TT chip 40.3 / 10.2 uW, of which the TT pin interface (input synchronisers, registered outputs, strobe protocol) is 9.8 / 6.4 uW and the clock root 2.2 uW | built with a patched clock-tree step (no latency balancing, F19); TT's standard image measures 49.0 / 17.1 uW for the chip (post-CTS preview, synthetic data) |
+| power, routed, real data | **24.5 uW** running / **0.6 uW** idle for the compression core; **26.7 / 2.8 uW** with its clock root (the in-scope block, table below) | patched clock-tree step (no latency balancing, F19); TT's standard image: 49.0 / 17.1 uW for the whole TT chip (post-CTS preview, synthetic data) |
 | area | 48.5k um^2 of cells after synthesis (337 flops, 1,168 latch bits, 126 clock gates); routed: 62.5k um^2 incl. clock tree and repair buffers, utilisation 0.56 of a 3x2 tile area | was 128k; 8 channels do not route in a 2x2 (F23) |
 | timing | setup +126.8 ns at 200 ns, hold +0.20 ns (routed, sign-off corners) | |
 | sign-off | gds + precheck + gate-level test green (run 38060355759); SDF gate level bit-exact at 5 corners with 0 timing-check violations (F28) | |
 | latency | sample -> packet decodable 13.4 ms; wavelet look-ahead 1.85 ms (F1) | fine for monitoring, not for a control loop |
+
+### Power breakdown (routed, real data, gds run 38060355759)
+
+**Scope.** The deliverable is the compression block as it would sit on an implant SoC, next to
+the ADC and the radio: the core plus its clock root. The Tiny Tapeout pin interface exists only
+to feed a test chip through slow GPIO pins (2-flop input synchronisers, registered outputs, the
+strobe protocol that emulates the ADC's slot stream at one slot per two clocks). On an implant
+the ADC and radio logic connect on chip, so that interface is out of scope; it is listed so the
+chip total adds up.
+
+| block | running | idle | in scope |
+|---|---|---|---|
+| compression core (slot selector, lifter, quantiser, rANS coder, config) | 24.5 uW | 0.6 uW | yes |
+| clock root (trunk to the core's clock gates) | 2.2 uW | 2.2 uW | yes |
+| **in-scope total** | **26.7 uW** | **2.8 uW** | budget 40 / 10 uW: pass |
+| TT pin interface (synchronisers, registered outputs, strobe protocol) | 9.8 uW | 6.4 uW | no: TT test access |
+| other (tie cells, glue outside both groups) | 3.7 uW | 1.0 uW | partly |
+| whole TT chip | 40.3 uW | 10.2 uW | |
+
+Running = 8 channels of real recordings at 5 MHz; idle = configured but disabled while the
+ADC stream keeps arriving (the state between recordings). Per
+channel in scope: 3.3 uW at 130 nm and 1.8 V. Block attribution by net names in the routed
+netlist (`scripts/flow/netlist.py`).
 
 Power history (routed, real data): 80.0 uW -> 34.8 uW (e13) by gating the clock tree (F17-F20),
 then +5 uW for the CDC fixes and test pins on the TT side (F26). Pre-layout the core went
@@ -56,8 +79,8 @@ crashed in post-route repair on that layout (GRT-0183), routing fixes being sign
 
 ## Known limitations
 
-- Power under 40 uW for the TT chip needs the patched clock-tree step; the core alone is under
-  it either way.
+- The in-scope block meets 40 / 10 uW with the patched clock-tree step; with TT's standard
+  image the whole TT chip is 49 / 17 uW (the in-scope share was not split for that run).
 - No rate cap: worst-case data exceeds a 1 Mbit/s radio; real data uses 0.33 Mbit/s.
 - rANS tables and quantiser shifts are fixed in ROM (trained on one dataset).
 - Fidelity is reported as SNR; spike-detection agreement is not measured yet.

@@ -14,7 +14,7 @@ corners. One page with every caveat: [docs/summary.md](docs/summary.md).
 | | result | |
 |---|---|---|
 | compression | 2.09 bits/sample (4.8:1), 18.0 dB median SNR | pass |
-| power (routed, real data) | compression core 24.5 uW running / 0.6 uW idle; whole TT chip 40.3 / 10.2 uW, of which 9.8 / 6.4 uW is the TT pin interface. Uses a patched clock-tree step; TT's standard image gives 49 / 17 uW for the chip. Was 629 uW before clock gating | core well under the 40 uW limit; the TT chip 0.25 uW over it |
+| power (routed, real data) | in-scope block (compression core + clock root): 26.7 uW running / 2.8 uW idle. The TT pin interface (test access only, not in scope) adds 9.8 / 6.4 uW: whole TT chip 40.3 / 10.2 uW. Breakdown and scope: [docs/summary.md](docs/summary.md). Patched clock-tree step; TT's standard image: 49 / 17 uW for the chip. Was 629 uW before clock gating | pass (40 / 10 uW budget) |
 | area | 48,500 um^2 of cells (from 128,000); 3x2 tiles, 56% utilisation | pass; 2x2 does not route at 8 channels |
 | timing | +127 ns setup, +0.20 ns hold at 200 ns (routed) | pass |
 | throughput | one ADC slot per clock; no input data can make it drop a packet at the real 256-clock frame (proof, +138 clocks of slack; RTL test T-BW-3) | pass |
