@@ -26,7 +26,9 @@ module nlc_encoder #(
     output wire                 m_last,
     output wire                 m_abort,
     output wire                 overflow,
-    output wire                 busy
+    output wire                 busy,
+    input  wire [15:0]          dbg_hot,     // DFT (D11): no gates here, nothing to observe
+    output wire [7:0]           dbg_obs
 );
 
   localparam MAXB = 8192;
@@ -56,5 +58,7 @@ module nlc_encoder #(
   assign overflow = 1'b0;
 
   assign busy = 1'b1;                        // replay: keep the core clocked
+  assign dbg_obs = 8'd0;
+  wire _unused = &{dbg_hot, 1'b0};
 
 endmodule

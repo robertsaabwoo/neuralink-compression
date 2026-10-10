@@ -27,7 +27,7 @@ Pins (`src/project.v`):
 | `uio[5]` | in | `cfg_en`: strobes carry config bytes, address then data; asynchronous, synchronised on chip |
 | `uio[6]` | out | `m_valid` |
 | `uio[7]` | out | `m_last`: this byte ends a packet |
-| `uo_out[7:0]` | out | output byte; config readback (below) |
+| `uo_out[7:0]` | out | output byte; config readback and debug modes (below) |
 
 1. With `cfg_en` = 1, write (address, data) pairs: `0x00` = 0x01 (lossy mode), `0x01` = number
    of channels (1-8), `0x10 + i` = slot of channel i (strictly ascending), then `0x00` = 0x81
@@ -42,6 +42,18 @@ Pins (`src/project.v`):
 4. Config readback (while `CTRL.enable` = 0): `cfg_en` = 1, strobe an address byte, wait 4
    clocks, read the register on `uo_out` (CTRL reads `{enable, 0000000}`), drop `cfg_en`
    without a data strobe (nothing is written).
+5. Debug modes (register `0x08`, written while `CTRL.enable` = 0; bits [1:0] mode, [7:4] group):
+   - `0x01` **raw bypass**: after enable, each frame's selected samples come out instead of
+     packets, channel by channel in slot order, 2 bytes each: `{000000, s[9:8]}`, `s[7:0]`;
+     `m_last` marks the frame's last byte. Checks pins, synchronisers and slot selection without
+     the compressor (which is held off). Needs a free clock after every selected slot (always the
+     case at one slot per 2 clocks); a lost byte sets `uio[4]`.
+   - `0xG2` **clock-gate observation**: `m_valid` = 1 every clock and `uo_out` shows, one clock
+     late, the enables of the 8 clock gates of group G (0-15; table in `docs/architecture.md`,
+     `scripts/dft/icg_map.py`). Disabled, only group 15 bits 1 and 6 read 1 (the always-on
+     gates): any other 1 is a gate that wastes idle power. It shows the enable, not the gated
+     clock itself.
+   - `0x00` normal (reset value).
 
 Decode with the Python model in the repository (`model/nlc/packet.py`, `decode_packet`).
 

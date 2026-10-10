@@ -98,7 +98,8 @@ def tests() -> None:
     suites = [("model/tests (pytest)", sorted((ROOT / "model" / "tests").glob("test_*.py")), r"^def test_"),
               ("test/lossy (cocotb)", [ROOT / "test/lossy/test_lossy.py"], r"^@cocotb\.test"),
               ("test/rans (cocotb)", sorted((ROOT / "test" / "rans").glob("test_*.py")), r"^@cocotb\.test"),
-              ("test/ TT top (cocotb)", [ROOT / "test/test_plumbing.py", ROOT / "test/test_modes.py"],
+              ("test/ TT top (cocotb)", [ROOT / "test/test_plumbing.py", ROOT / "test/test_modes.py",
+                                         ROOT / "test/test_dft.py"],
                r"^@cocotb\.test")]
     for name, files, pat in suites:
         n = sum(len(re.findall(pat, f.read_text(encoding="utf-8"), re.M)) for f in files if f.exists())

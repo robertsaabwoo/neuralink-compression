@@ -134,9 +134,15 @@ def load_vectors(mode: str) -> tuple[list[list[int]], list[tuple[int, int]], dic
 
 
 async def run_vector_test(dut, mode: str) -> None:
-    frames, expected, cfg = load_vectors(mode)
     pins = await reset(dut)
-    await configure(pins, cfg)
+    await configure(pins, load_vectors(mode)[2])
+    await run_vectors_on(pins, mode)
+
+
+async def run_vectors_on(pins: Pins, mode: str) -> None:
+    """Drive the vectors into a DUT already configured and enabled, check the bytes."""
+    dut = pins.dut
+    frames, expected, cfg = load_vectors(mode)
     got: list[tuple[int, int]] = []
     adc = cocotb.start_soon(drive_adc(pins, frames, cfg["slots"], cfg["n_slots"]))
     reader = cocotb.start_soon(read_bytes(pins, len(expected), got))

@@ -42,7 +42,7 @@ Results: `reports/latest/summary.md`, `reports/latest/metrics.json`, logs and ne
 |---|---|---|---|
 | `test/lossy` | `nlc_lossy` (wavelet, shared lifter, rANS, serialiser) | `adjacent_slots_short_frames` (8 channels back to back, 64-slot frames: below the D9 rate, a functional check on real data), `spread_slots_256` (8 of 256 slots, one slot per clock), `power_window` (1 packet at the operating point) | bytes == model, **then decoded** by the model; `overflow` = 0; prints bits/sample and SNR. Real challenge data (files 300+, not in ROM training) or synthetic if `data/raw` is absent |
 | `test/rans` | `rans_tdm_static`, `rans_tdm_adaptive` (`src/robs_rANS`) | static: reset table, loaded tables + reload, full-rate II=1, writes ignored while packet open; adaptive: random gaps + backpressure, full-rate II=1 | bytes == model, decoded |
-| `test/` (TT top) | `tt_um_nlc_compressor` through the pins | `test_plumbing`: config registers, slot selector, config readback (T-IF-6), overflow pin (T-IF-7); `test_modes`: **lossy**; `test_power`: T-PWR-3 scenarios | bytes == vectors from `scripts/gen_vectors.py` (32-slot frames, 2 clocks per slot) |
+| `test/` (TT top) | `tt_um_nlc_compressor` through the pins | `test_plumbing`: config registers, slot selector, config readback (T-IF-6), overflow pin (T-IF-7); `test_modes`: **lossy**; `test_dft`: raw bypass (T-IF-8), gate observation (T-IF-9); `test_power`: T-PWR-3 scenarios | bytes == vectors from `scripts/gen_vectors.py` (32-slot frames, 2 clocks per slot) |
 | `test/` with `ENCODER=replay` | TT top with `test/mock/nlc_encoder_replay.v` | same, minus the overflow pin (needs the real encoder) | harness self-test: pins, config, readback, slot selector, output capture with the golden bytes replayed |
 | `test/core` | `nlc_core` (slot selector, encoder, config) at the real interface: 256 slots, one per clock (II = 1, D9), 200 ns | T-IF-1/2/3, T-BW-1/3, T-ROB-1..7, T-PWR-2 (T-ROB-1 needs `NLC_LONG=1`) | environment `test/env/nlc_env.py` (4.1): ADC mux, config port, host model (takes every byte, D8), scoreboard by seq, monitors for latency/bandwidth/coverage; one JSON per test in `$NLC_RESULTS` |
 
@@ -184,6 +184,8 @@ happens later; the test only tells you which parameter is affected.
 | T-IF-5 | TT top with the generator (T-GEN-2) at full rate | bit-exact | C-IF-1, G-* | new |
 | T-IF-6 | Config readback on `uo_out` (cfg_en = 1, enable = 0, address strobe); a readback writes nothing | values match the writes | C-IF-12 | exists, pass (`test_plumbing.test_config_readback`) |
 | T-IF-7 | Sticky overflow on `uio[4]`: 8-slot frames (far below the D9 rate) make the coder fall a frame behind; `enable` = 0 clears it | pin high, then cleared | C-IF-12, C-OVF-6 | exists, pass (`test_plumbing.test_overflow_pin`) |
+| T-IF-8 | Raw bypass (`DBG` = 1) through the pins: 8 adjacent slots, 33 frames incl. 0x3FF / 0 / bit patterns; expected bytes built from the driven samples (not from the RTL); a `DBG` write while enabled is ignored; `DBG` reads back; then mode 0 runs the lossy vectors | raw stream exact (528 bytes), no overflow; then bit-exact | C-IF-13, D11 | exists, pass (`test_dft.t_if_8_raw_bypass`; also gate level) |
+| T-IF-9 | Gate observation (`DBG` = 2): idle (`enable` = 0) every group reads 0 but the always-on gates (group 15 = 0x42), `m_valid` every clock; RTL: all 16 groups while compressing 8 channels (24 frames each), `uo_out` == the `en` of each mapped gate one clock earlier, every clock; every gate seen open except the config-write gates and the raw-bypass gate | exact every clock | C-IF-14, D11 | exists, pass (`test_dft.t_if_9_icg_observe`; gate level: the idle part) |
 
 **Overflow (decision D3) - retired by D8**
 
@@ -223,7 +225,7 @@ Aborts are covered by T-IF-3, T-ROB-2/4/7 and the overflow pin by T-IF-7.
 |---|---|---|---|---|
 | T-LINT-1 | Verilator lint: lossy core `-Wall`, TT top errors | 0 errors | C-RTL-1 | exists |
 | T-GL-1 | Lossy core netlist (sky130 cells) runs `test/lossy` at 200 ns | bit-exact | C-FN-5, C-RTL-2 | exists |
-| T-GL-2 | **TT top** netlist (like TT's `gl_test`) runs T-IF-4 and T-IF-5 | bit-exact | C-FN-5, C-TIM-4 | exists, pass (Yosys netlist, `GATES=local`) |
+| T-GL-2 | **TT top** netlist (like TT's `gl_test`) runs T-IF-4, T-IF-5 and T-IF-8/9 (9: idle part) | bit-exact | C-FN-5, C-TIM-4 | exists, pass (Yosys netlist, `GATES=local`) |
 | T-GL-3 | Post-layout gate-level with SDF from the TT GDS action | bit-exact | C-FN-5, C-TIM-1 | new (after first GDS run) |
 | T-EQ-1 | RTL vs netlist equivalence (Yosys `equiv_*` or SymbiYosys) as a fast check next to T-GL-1 | proven equivalent | C-FN-5, C-RTL-2 | new |
 | T-FV-1 | Formal properties on the plumbing (SymbiYosys): slot selector emits each configured slot exactly once per frame, in order | proven (bounded) | C-IF-2/4 | new |
@@ -312,6 +314,7 @@ overflow policy) are reproducible by a named test.
 | C-IF-9 | T-BW-3, T-IF-4 |
 | C-IF-10/11 | T-IF-4 |
 | C-IF-12 | T-IF-6, T-IF-7 |
+| C-IF-13/14 | T-IF-8, T-IF-9 |
 | C-FN-1/2 | T-ALG-1, T-CHG-1..7, T-IF-*, T-GL-*, T-ROB-6 |
 | C-FN-3 | T-ALG-4, T-ROB-4 |
 | C-FN-4 | T-ROB-1 |

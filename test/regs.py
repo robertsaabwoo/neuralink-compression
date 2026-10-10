@@ -4,11 +4,14 @@ from __future__ import annotations
 
 CTRL = 0x00          # [7] enable, [1:0] mode (ignored by the hardware; write MODE_LOSSY)
 N_SEL = 0x01
+DBG = 0x08           # DFT (D11): [1:0] mode, [7:4] gate group; written only while enable = 0
 SEL_SLOT = 0x10
 
 MODE_LOSSY = 0x01
 CTRL_ENABLE = 0x80
 N_SEL_MAX = 8
+
+DBG_NORMAL, DBG_RAW, DBG_ICG = 0, 1, 2   # DBG[1:0]; 3 = reserved (normal)
 
 
 def config_writes(cfg: dict) -> list[tuple[int, int]]:

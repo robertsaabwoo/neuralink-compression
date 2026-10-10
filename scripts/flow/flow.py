@@ -261,7 +261,7 @@ def step_rtl(r: Run) -> None:
         summary[name] = f"{sum(ok for _, ok in res)}/{len(res)}"
         r.failed_tests += [f"rtl {name}: {n}" for n, ok in res if not ok]
     r.sh("python scripts/gen_vectors.py --out test/vectors", "rtl_top_vectors.log")
-    res = cocotb_parallel(r, ROOT / "test", "rtl_top", "test_plumbing,test_modes")
+    res = cocotb_parallel(r, ROOT / "test", "rtl_top", "test_plumbing,test_modes,test_dft")
     for n, ok in res:
         if not ok and n in PENDING_TESTS:
             r.pending_tests.append(n)
@@ -519,10 +519,14 @@ def step_gl(r: Run) -> None:
     def gl_top():
         if not top_net.exists():
             return None
-        shutil.rmtree(ROOT / "test/sim_build/gl_local", ignore_errors=True)
-        return _cocotb(r, ROOT / "test", "gl_top.log",
-                       f"GATES=local NETLIST={top_net} CLK_NS={OP['clock_period_ns']} "
-                       "COCOTB_TEST_FILTER='test_lossy$'")
+        res = []
+        # T-IF-4, then the DFT modes T-IF-8/9 (two runs: a '|' in the filter breaks make)
+        for log, filt in [("gl_top.log", "test_lossy$"), ("gl_top_dft.log", "t_if_[89]_")]:
+            shutil.rmtree(ROOT / "test/sim_build/gl_local", ignore_errors=True)
+            res += _cocotb(r, ROOT / "test", log,
+                           f"GATES=local NETLIST={top_net} CLK_NS={OP['clock_period_ns']} "
+                           f"COCOTB_TEST_FILTER='{filt}'")
+        return res
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         top_res = pool.submit(gl_top)

@@ -65,7 +65,9 @@ module nlc_lossy #(
     output logic [7:0]       m_data,
     output logic             m_last,
     output logic             overflow,     // sticky: a packet was aborted (coder a frame behind)
-    output logic             abort_req     // packet in flight dropped (one clock)
+    output logic             abort_req,    // packet in flight dropped (one clock)
+    input  logic [15:0]      dbg_hot,      // DFT (D11): one-hot gate group, 0 in normal mode
+    output logic [7:0]       dbg_obs       // this block's gate enables in that group
 );
   // fixed by LossyConfig: adc_bits 10, block 64, levels 3, shifts a 1 / d (3, 2, 2),
   // s_max 31, esc_bytes 2, prob_bits 12, lsh 2
@@ -146,10 +148,13 @@ module nlc_lossy #(
   // grandparent: the block gates below only see the clock while something is happening
   logic iss_busy;
   assign iss_busy = pending != '0;
-  nlc_icg u_cg_l (.clk(clk), .en(smp_valid || smp_tick || iss_busy || c_active || abort_now ||
-                                 m_valid), .gclk(clk_l));
-  nlc_icg u_cg_s (.clk(clk_l), .en(smp_valid || smp_tick), .gclk(clk_s));
-  nlc_icg u_cg_i (.clk(clk_l), .en(smp_valid || iss_busy || abort_now), .gclk(clk_i));
+  logic en_l, en_s, en_i;
+  assign en_l = smp_valid || smp_tick || iss_busy || c_active || abort_now || m_valid;
+  assign en_s = smp_valid || smp_tick;
+  assign en_i = smp_valid || iss_busy || abort_now;
+  nlc_icg u_cg_l (.clk(clk), .en(en_l), .gclk(clk_l));
+  nlc_icg u_cg_s (.clk(clk_l), .en(en_s), .gclk(clk_s));
+  nlc_icg u_cg_i (.clk(clk_l), .en(en_i), .gclk(clk_i));
 
   // ---------------------------------------------------------------------------
   // Issuer + wavelet: the sample of channel rr in frame j is lifted one level per
@@ -274,7 +279,9 @@ module nlc_lossy #(
   assign e2_d = kk == 2'd0 ? la[10:0] : lx[10:0];  // a1 from the lifter / from xr
   assign e3_d = kk == 2'd1 ? la[11:0] : lx[11:0];  // a2 from the lifter / from xr
 
-  nlc_greg #(.W(13)) u_x (.clk(clk_i), .en((st0 && pv2) || (st1 && pv3) || st2),
+  logic en_x;
+  assign en_x = (st0 && pv2) || (st1 && pv3) || st2;
+  nlc_greg #(.W(13)) u_x (.clk(clk_i), .en(en_x),
                           .d(st2 ? da3 : la), .q(xr));
 
   // Per-channel rows (nlc_rreg): latch rows when LATCH_ROWS. A latch row is open for
@@ -295,33 +302,51 @@ module nlc_lossy #(
   logic [12:0] sg_dp;
   logic [9:0]  sg_sx;
   assign w_xq = kk == 2'd2 ? qa3[11:0] : {2'b00, lx[9:0]};
+  logic en_sg, en_sgx;                   // gate enables (0: no staging gates)
   generate
     if (LATCH_ROWS) begin : g_sg
-      nlc_greg #(.W(12 + 11 + 12 + 13)) u_sg (.clk(clk_i), .en(st),
+      assign en_sg  = st;
+      assign en_sgx = clr_n && run && smp_valid;
+      nlc_greg #(.W(12 + 11 + 12 + 13)) u_sg (.clk(clk_i), .en(en_sg),
           .d({w_xq, e2_d, e3_d, ld}), .q({sg_xq, sg_e2, sg_e3, sg_dp}));
-      nlc_greg #(.W(10)) u_sgx (.clk(clk_s), .en(clr_n && run && smp_valid), .d(x0), .q(sg_sx));
+      nlc_greg #(.W(10)) u_sgx (.clk(clk_s), .en(en_sgx), .d(x0), .q(sg_sx));
     end else begin : g_nosg
+      assign {en_sg, en_sgx} = 2'b00;
       assign {sg_xq, sg_e2, sg_e3, sg_dp, sg_sx} = {w_xq, e2_d, e3_d, ld, x0};
     end
   endgenerate
 
+  // row write enables, [row][channel]: gate groups 0..10 (scripts/dft/icg_map.py)
+  localparam int N_ROW = 11;
+  logic [N_ROW-1:0][N_SEL-1:0] en_row;
   genvar gc;
   generate
     for (gc = 0; gc < N_SEL; gc++) begin : g_ch
       logic wr, iw;                      // this channel's sample (outside clear) / issue step
       assign wr = clr_n && run && smp_valid && smp_ch == SEL_W'(gc);
       assign iw = rr == SEL_W'(gc);
-      nlc_rreg #(.W(10), .LATCH(LATCH_ROWS)) u_sx  (.clk(clk_s), .en(wr),                    .d(sg_sx),         .q(sx[gc]));
-      nlc_rreg #(.W(10), .LATCH(LATCH_ROWS)) u_e1  (.clk(clk_i), .en(iw && st0 && !f[0]),    .d(sg_xq[9:0]),    .q(e1[gc]));
-      nlc_rreg #(.W(10), .LATCH(LATCH_ROWS)) u_o1  (.clk(clk_i), .en(iw && st0 && f[0]),     .d(sg_xq[9:0]),    .q(o1[gc]));
-      nlc_rreg #(.W(11), .LATCH(LATCH_ROWS)) u_dp1 (.clk(clk_i), .en(iw && st0 && pv1),      .d(sg_dp[10:0]),   .q(dp1[gc]));
-      nlc_rreg #(.W(11), .LATCH(LATCH_ROWS)) u_e2  (.clk(clk_i), .en(iw && l2_in && !f1[0]), .d(sg_e2),         .q(e2[gc]));
-      nlc_rreg #(.W(11), .LATCH(LATCH_ROWS)) u_o2  (.clk(clk_i), .en(iw && l2_in && f1[0]),  .d(sg_e2),         .q(o2[gc]));
-      nlc_rreg #(.W(12), .LATCH(LATCH_ROWS)) u_dp2 (.clk(clk_i), .en(iw && st1),             .d(sg_dp[11:0]),   .q(dp2[gc]));
-      nlc_rreg #(.W(12), .LATCH(LATCH_ROWS)) u_e3  (.clk(clk_i), .en(iw && l3_in && !f2[0]), .d(sg_e3),         .q(e3[gc]));
-      nlc_rreg #(.W(12), .LATCH(LATCH_ROWS)) u_o3  (.clk(clk_i), .en(iw && l3_in && f2[0]),  .d(sg_e3),         .q(o3[gc]));
-      nlc_rreg #(.W(13), .LATCH(LATCH_ROWS)) u_dp3 (.clk(clk_i), .en(iw && st2),             .d(sg_dp),         .q(dp3[gc]));
-      nlc_rreg #(.W(12), .LATCH(LATCH_ROWS)) u_qa  (.clk(clk_i), .en(iw && st2),             .d(sg_xq),         .q(qa_prev[gc]));
+      assign en_row[0][gc]  = wr;
+      assign en_row[1][gc]  = iw && st0 && !f[0];
+      assign en_row[2][gc]  = iw && st0 && f[0];
+      assign en_row[3][gc]  = iw && st0 && pv1;
+      assign en_row[4][gc]  = iw && l2_in && !f1[0];
+      assign en_row[5][gc]  = iw && l2_in && f1[0];
+      assign en_row[6][gc]  = iw && st1;
+      assign en_row[7][gc]  = iw && l3_in && !f2[0];
+      assign en_row[8][gc]  = iw && l3_in && f2[0];
+      assign en_row[9][gc]  = iw && st2;
+      assign en_row[10][gc] = iw && st2;
+      nlc_rreg #(.W(10), .LATCH(LATCH_ROWS)) u_sx  (.clk(clk_s), .en(en_row[0][gc]),  .d(sg_sx),       .q(sx[gc]));
+      nlc_rreg #(.W(10), .LATCH(LATCH_ROWS)) u_e1  (.clk(clk_i), .en(en_row[1][gc]),  .d(sg_xq[9:0]),  .q(e1[gc]));
+      nlc_rreg #(.W(10), .LATCH(LATCH_ROWS)) u_o1  (.clk(clk_i), .en(en_row[2][gc]),  .d(sg_xq[9:0]),  .q(o1[gc]));
+      nlc_rreg #(.W(11), .LATCH(LATCH_ROWS)) u_dp1 (.clk(clk_i), .en(en_row[3][gc]),  .d(sg_dp[10:0]), .q(dp1[gc]));
+      nlc_rreg #(.W(11), .LATCH(LATCH_ROWS)) u_e2  (.clk(clk_i), .en(en_row[4][gc]),  .d(sg_e2),       .q(e2[gc]));
+      nlc_rreg #(.W(11), .LATCH(LATCH_ROWS)) u_o2  (.clk(clk_i), .en(en_row[5][gc]),  .d(sg_e2),       .q(o2[gc]));
+      nlc_rreg #(.W(12), .LATCH(LATCH_ROWS)) u_dp2 (.clk(clk_i), .en(en_row[6][gc]),  .d(sg_dp[11:0]), .q(dp2[gc]));
+      nlc_rreg #(.W(12), .LATCH(LATCH_ROWS)) u_e3  (.clk(clk_i), .en(en_row[7][gc]),  .d(sg_e3),       .q(e3[gc]));
+      nlc_rreg #(.W(12), .LATCH(LATCH_ROWS)) u_o3  (.clk(clk_i), .en(en_row[8][gc]),  .d(sg_e3),       .q(o3[gc]));
+      nlc_rreg #(.W(13), .LATCH(LATCH_ROWS)) u_dp3 (.clk(clk_i), .en(en_row[9][gc]),  .d(sg_dp),       .q(dp3[gc]));
+      nlc_rreg #(.W(12), .LATCH(LATCH_ROWS)) u_qa  (.clk(clk_i), .en(en_row[10][gc]), .d(sg_xq),       .q(qa_prev[gc]));
     end
   endgenerate
 
@@ -409,13 +434,28 @@ module nlc_lossy #(
   logic        c_valid, c_ready, c_last;
   logic [31:0] c_data;
   logic [3:0]  c_keep;
+  logic [7:0]  c_obs;
 
   nlc_rans #(.N_CH(N_SEL), .CH_W(SEL_W), .DIV_K(DIV_K), .LATCH_ROWS(LATCH_ROWS)) u_rans (
       .clk(clk_l), .rst_n(clr_n && !skip), .active(c_active),
       .s_tvalid(r_valid), .s_tready(r_ready), .s_tdata(hsym), .s_tctx(hctx),
       .s_tchan(rr_iss), .s_traw_v(is_esc), .s_traw(hraw), .s_tlast(r_last),
       .m_tvalid(c_valid), .m_tready(c_ready), .m_tdata(c_data), .m_tkeep(c_keep),
-      .m_tlast(c_last));
+      .m_tlast(c_last), .dbg_hot(dbg_hot), .dbg_obs(c_obs));
+
+  // ---------------------------------------------------------------------------
+  // DFT (D11): gate enables of the selected group (scripts/dft/icg_map.py): rows 0..10 =
+  // groups 0..10 (bit = channel), the block gates = group 12 bits 0..6, plus the coder's.
+  // dbg_hot is 0 in normal mode, so none of this toggles then.
+  // ---------------------------------------------------------------------------
+  logic [7:0] row_obs;
+  always_comb begin
+    row_obs = '0;
+    for (int r = 0; r < N_ROW; r++)
+      row_obs = row_obs | ({8{dbg_hot[r]}} & 8'(en_row[r]));
+  end
+  assign dbg_obs = c_obs | row_obs |
+                   ({8{dbg_hot[12]}} & {1'b0, en_o, en_sgx, en_sg, en_x, en_i, en_s, en_l});
 
   // ---------------------------------------------------------------------------
   // Serialiser: header byte {mode = 1, seq}, then the bytes of the coder's output
@@ -436,9 +476,9 @@ module nlc_lossy #(
   // reached the coder's clock gate and made m_valid X at gate level. Bit-identical (D8 11071e4).
   assign c_ready = c_valid && !need_hdr && w_end;
 
-  logic clk_o;
-  nlc_icg u_cg_o (.clk(clk_l), .en(m_valid || abort_now || resume_now),
-                  .gclk(clk_o));
+  logic clk_o, en_o;
+  assign en_o = m_valid || abort_now || resume_now;
+  nlc_icg u_cg_o (.clk(clk_l), .en(en_o), .gclk(clk_o));
 
   always_ff @(posedge clk_o or negedge clr_n) begin
     if (!clr_n) begin

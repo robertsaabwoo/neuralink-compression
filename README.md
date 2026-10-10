@@ -50,7 +50,7 @@ Results land in `reports/latest/summary.md`.
 |---|---|
 | [docs/platform.md](docs/platform.md) | the environment the chip lives in: Neuralink's architecture, Tiny Tapeout limits |
 | [docs/architecture.md](docs/architecture.md) | how the RTL is built, what it costs, where to change what |
-| [docs/constraints.md](docs/constraints.md) | requirements (C-*) and decisions D1-D10 |
+| [docs/constraints.md](docs/constraints.md) | requirements (C-*) and decisions D1-D11 |
 | [docs/testing.md](docs/testing.md) | how to run, test inventory, verification plan (T-*) |
 | [docs/results.md](docs/results.md) | findings, budgets, measured data |
 | [docs/budgets.md](docs/budgets.md) | where each pass/fail number comes from |
