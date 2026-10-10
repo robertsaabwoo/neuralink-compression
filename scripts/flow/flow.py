@@ -60,12 +60,6 @@ AREA_SWEEP = [2, 4, 8, 16]    # N_SEL values for T-AREA-2 (SEL_W >= 1, so no N_S
 PENDING_TESTS: set[str] = set()
 # test/core tests that fail on today's RTL; name prefix -> reason (docs/testing.md section 3).
 # A prefix may cover cases that pass (e.g. a stall short enough to be absorbed).
-_ABORT = ("F2: disable mid-packet must end the packet with the abort token (D7); "
-          "today the next run's packet 0 is glued to it")
-_OVF = ("F3: a blocked output must abort the packet, flush and resume at the next packet (D6); "
-        "today every later packet is corrupt")
-_FRAME = ("F4: a short frame must repeat the missing channels' previous samples (D5); "
-          "today the channel order slips for good")
 KNOWN_FAIL: dict[str, str] = {}     # D5-D7 implemented 2026-10-08 (was: t_ovf_1/2, t_rob_2/3/4)
 # functional coverage bins the T2 regression must hit (docs/testing.md 4.5)
 COVERAGE_BINS = ([f"esc_ctx{c}" for c in range(4)] + ["esc_consecutive", "esc_last_symbol"]
@@ -261,7 +255,7 @@ def step_rtl(r: Run) -> None:
         summary[name] = f"{sum(ok for _, ok in res)}/{len(res)}"
         r.failed_tests += [f"rtl {name}: {n}" for n, ok in res if not ok]
     r.sh("python scripts/gen_vectors.py --out test/vectors", "rtl_top_vectors.log")
-    res = cocotb_parallel(r, ROOT / "test", "rtl_top", "test_plumbing,test_modes")
+    res = cocotb_parallel(r, ROOT / "test", "rtl_top", "test_plumbing,test_modes,test_abort")
     for n, ok in res:
         if not ok and n in PENDING_TESTS:
             r.pending_tests.append(n)
@@ -520,9 +514,11 @@ def step_gl(r: Run) -> None:
         if not top_net.exists():
             return None
         shutil.rmtree(ROOT / "test/sim_build/gl_local", ignore_errors=True)
+        # test_lossy + test_abort_* (abort token, T-ROB-2/4 at the pins); make cannot take
+        # a `|` in the filter, hence the character classes
         return _cocotb(r, ROOT / "test", "gl_top.log",
                        f"GATES=local NETLIST={top_net} CLK_NS={OP['clock_period_ns']} "
-                       "COCOTB_TEST_FILTER='test_lossy$'")
+                       "COCOTB_TEST_FILTER='test_[la][ob]'")
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         top_res = pool.submit(gl_top)

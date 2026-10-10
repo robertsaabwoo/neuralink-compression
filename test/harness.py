@@ -4,6 +4,8 @@ The pin protocol is defined in src/project.v. Summary:
   ui_in = sample[7:0] / config byte; uio[1:0] = sample[9:8]
   uio[2] s_strobe, uio[3] s_frame, uio[5] cfg_en  (inputs)
   uio[4] overflow, uio[6] m_valid, uio[7] m_last, uo_out = m_data  (outputs, registered)
+  abort token (D5/D7): uio[7] m_last = 1 with uio[6] m_valid = 0 for one clock; the host
+  drops its partial packet (test_abort.py provokes it; run_vector_test fails on one)
 
 The ADC side never waits: one strobe every SLOT_CYCLES clocks, n_slots slots
 per frame, selected channels at their slots and random filler elsewhere.
@@ -110,14 +112,35 @@ async def drive_adc(pins: Pins, frames, slots: list[int], n_slots: int,
         first = False
 
 
+ABORT = "abort"                            # read_events: the abort token
+
+
+async def read_events(pins: Pins, events: list) -> None:
+    """Act as the host, forever (cancel the task to stop): the output streams one byte per
+    clock while m_valid (no ack, D8). At every falling edge append (byte, last) when
+    m_valid = 1, or ABORT for the abort token (m_last = 1 with m_valid = 0). X/Z on m_valid
+    or m_last, or on m_data with m_valid, raises (int() of an unresolved value)."""
+    dut = pins.dut
+    while True:
+        await FallingEdge(dut.clk)
+        valid, last = int(dut.m_valid.value), int(dut.m_last.value)
+        if valid:
+            events.append((int(dut.m_data.value), last))
+        elif last:
+            events.append(ABORT)
+
+
 async def read_bytes(pins: Pins, n: int, got: list) -> None:
-    """Act as the host: the output streams one byte per clock while m_valid (no ack, D8), so
-    capture (byte, last) at every falling edge where m_valid is high."""
+    """read_events until n bytes are in `got`; an abort token is an error here (no test that
+    uses this provokes one)."""
     dut = pins.dut
     while len(got) < n:
         await FallingEdge(dut.clk)
-        if int(dut.m_valid.value):
-            got.append((int(dut.m_data.value), int(dut.m_last.value)))
+        valid, last = int(dut.m_valid.value), int(dut.m_last.value)
+        if valid:
+            got.append((int(dut.m_data.value), last))
+        else:
+            assert not last, f"abort token (m_last = 1, m_valid = 0) after {len(got)} bytes"
 
 
 def load_vectors(mode: str) -> tuple[list[list[int]], list[tuple[int, int]], dict]:
