@@ -30,7 +30,14 @@ from pathlib import Path
 MOD = re.compile(r"^\s*module\s+(\w+)\b.*?^\s*endmodule\b", re.S | re.M)
 INST = re.compile(r"^\s*(sky130_fd_sc_hd__\w+)\s+(?:#\s*\(.*?\)\s*)?\\?\S+\s*\(", re.M)
 INST_NAME = re.compile(r"^\s*(sky130_fd_sc_hd__\w+)\s+(\\?\S+)\s*\(", re.M)
+ESC_V = re.compile(r"\\(\S+)\s")                     # Verilog escaped identifier
+SDF_ID = re.compile(r"(?:[\w\[\]]|\\.)*\\.(?:[\w\[\]]|\\.)*")   # SDF name with an escape
 CHECK = re.compile(r"(\$(?:setuphold|recrem))\s*\((.*?)\)\s*;", re.S)
+
+
+def plain(name: str) -> str:
+    """A unique plain identifier for an escaped one: non-word characters as _xx_ (hex)."""
+    return "esc_" + re.sub(r"\W", lambda c: f"_{ord(c.group(0)):02x}_", name)
 
 
 def split_args(s: str) -> list[str]:
@@ -138,6 +145,20 @@ def main() -> None:
         return m.group(0)
 
     sdf = re.sub(r"^\s*\(INTERCONNECT\s+\S+\s+(\S+)\s.*\n", ic, sdf_in, flags=re.M)
+
+    # escaped identifiers (`\u_cfg_addr.u_icg.u_cg ` in the netlist, `u_cfg_addr\.u_icg\.u_cg`
+    # in the SDF) become plain ones in both: Icarus 13 cannot look them up from the SDF
+    # (NULL handle, abort)
+    nl, n_nl = ESC_V.subn(lambda m: plain(m.group(1)) + " ", a.netlist.read_text())
+    (a.out / "sim_nl.v").write_text(nl)
+
+    def sdf_name(m: re.Match) -> str:
+        parts = re.split(r"(?<!\\)\.", m.group(0))
+        return ".".join(plain(p.replace("\\", "")) if "\\" in p else p for p in parts)
+
+    sdf, n_sdf = SDF_ID.subn(sdf_name, sdf)
+    log.append(f"escaped identifiers made plain: {n_nl} in the netlist (sim_nl.v), "
+               f"{n_sdf} SDF names")
     (a.out / "sim.sdf").write_text(sdf)
     log.append(f"SDF: {dropped} INTERCONNECT entries into cells without a specify block dropped")
     for kind in ("CELL", "IOPATH", "INTERCONNECT", "SETUP", "HOLD", "SETUPHOLD", "RECOVERY",

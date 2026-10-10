@@ -24,6 +24,15 @@ module tb ();
 `ifdef SDF
   // T-GL-3: back-annotate the routed netlist with LibreLane's SDF (make GATES=sdf)
   initial $sdf_annotate(`SDF_FILE, user_project);
+  // evidence that the delays are annotated: clock pin -> registered output pins, new extremes
+  real t_clk, d, d_min, d_max;
+  initial begin t_clk = 0; d_min = 1e9; d_max = 0; end
+  always @(posedge clk) t_clk = $realtime;
+  always @(uo_out or uio_out) if (rst_n === 1'b1 && t_clk > 0) begin
+    d = $realtime - t_clk;
+    if (d < d_min) begin d_min = d; $display("SDF clk->out delay: new min %0.3f ns", d); end
+    if (d > d_max) begin d_max = d; $display("SDF clk->out delay: new max %0.3f ns", d); end
+  end
 `endif
 
   reg clk;

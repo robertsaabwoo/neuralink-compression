@@ -115,12 +115,12 @@ jobs:
         working-directory: test
         run: |
           set -o pipefail
-          make GATES=sdf SIM=$SIM NETLIST="$GL/nl.v" SDF="$GL/sim.sdf" NLC_PDK="$GL/pdk" \
+          make GATES=sdf SIM=$SIM NETLIST="$GL/sim_nl.v" SDF="$GL/sim.sdf" NLC_PDK="$GL/pdk" \
             COCOTB_TEST_MODULES="$TESTS" COCOTB_PLUSARGS=+nodump 2>&1 | tee sim.log
 
       - name: results
         if: always()
-        run: python scripts/ci/sdf_summary.py --sim "$SIM" --corner "$CORNER" --run "$(cat run.txt)" --log test/sim.log --results test/results.xml | tee -a "$GITHUB_STEP_SUMMARY"
+        run: python scripts/ci/sdf_summary.py --sim "$SIM" --corner "$CORNER" --run "$(cat run.txt)" --log test/sim.log --sdf-log test/sdf_cvc.log --results test/results.xml | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: upload logs
         if: always()
@@ -129,6 +129,7 @@ jobs:
           name: sdf_sim_${{ env.RUN_ID }}_${{ env.CORNER }}_${{ matrix.sim }}
           path: |
             test/sim.log
+            test/sdf_cvc.log
             test/results.xml
             gl/*.txt
             gl/pdk/verilog/sky130_fd_sc_hd.v

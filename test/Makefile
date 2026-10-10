@@ -36,7 +36,7 @@ else ifeq ($(GATES),sdf)
 NLC_PDK ?= /pdk
 SIM_BUILD = sim_build/gl_sdf_$(SIM)
 ifeq ($(SIM),cvc)
-COMPILE_ARGS += +define+SDF +define+SDF_FILE=\"$(SDF)\"
+COMPILE_ARGS += +define+SDF +define+SDF_FILE=\"$(SDF)\" +typdelays +sdf_log_file sdf_cvc.log
 else
 COMPILE_ARGS += -DSDF -DSDF_FILE=\"$(SDF)\" -gspecify -ginterconnect
 endif
