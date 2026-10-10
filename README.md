@@ -7,25 +7,23 @@ compression ratio.
 
 ## Status
 
-**Hardening for a Tiny Tapeout submission (digital, 1.8 V, 3x2 tiles).** The RTL matches the
-Python model bit for bit. Power and area are within the limits of the Neuralink-derived budgets; the open
-item is an OpenROAD clock-tree bug on the final RTL (below).
+**Signed off for a Tiny Tapeout submission (digital, 1.8 V, 3x2 tiles):** gds, precheck and
+gate-level test green (run 38060355759); the routed netlist is bit-exact with real delays at 5
+corners. One page with every caveat: [docs/summary.md](docs/summary.md).
 
 | | result | |
 |---|---|---|
-| compression | 2.09 bits/sample, 18.0 dB median SNR | pass |
-| power | 34.8 uW running, 9.5 uW idle: routed, real data, signed off on the pre-area-round RTL (e13); the 3x2 build before the test-access pins: 34.7 / 9.4 uW in a post-CTS preview on synthetic data. Was 629 uW before clock gating | under the 40 uW limit, over the 16 uW target |
-| area | 48,500 um^2 of cells (from 128,000); 3x2 tiles, ~55% utilisation | pass; 2x2 does not route at 8 channels |
-| timing | +129 ns setup slack at 200 ns (slow corner) | pass |
-| throughput | one ADC slot per clock; no input data can make it drop a packet at the real 256-clock frame (proof, +138 clocks of slack; RTL test T-BW-3: worst-case data, 6/6 pass) | pass |
-| tests | model, RTL, core and gate-level suites pass; signed-off GDS for the 3x2 build without the test-access pins | final RTL: placement density 64 avoids the CTS bug (F27); sign-off run pending |
+| compression | 2.09 bits/sample (4.8:1), 18.0 dB median SNR | pass |
+| power (routed, real data) | compression core 24.5 uW running / 0.6 uW idle; whole TT chip 40.3 / 10.2 uW, of which 9.8 / 6.4 uW is the TT pin interface. Uses a patched clock-tree step; TT's standard image gives 49 / 17 uW for the chip. Was 629 uW before clock gating | core well under the 40 uW limit; the TT chip 0.25 uW over it |
+| area | 48,500 um^2 of cells (from 128,000); 3x2 tiles, 56% utilisation | pass; 2x2 does not route at 8 channels |
+| timing | +127 ns setup, +0.20 ns hold at 200 ns (routed) | pass |
+| throughput | one ADC slot per clock; no input data can make it drop a packet at the real 256-clock frame (proof, +138 clocks of slack; RTL test T-BW-3) | pass |
+| tests | model 80, core 46/46, TT top 7/7, gate level, SDF 5 corners, bring-up diagnosis 26/26 faults | pass |
 
-Open items (detail in [docs/results.md](docs/results.md)):
-- OpenROAD CTS left one clock gate without its clock pin at placement density 60 (F27); density
-  64 avoids it (all 126 gates connected), the root cause in OpenROAD is not known;
-- processing latency is 1.85 ms, set by the wavelet look-ahead (F1). It is not observable at the
-  pins (packets decode whole, 13.4 ms); the challenge's "< 1 ms" is read as real-time
-  throughput, which the chip guarantees (C-LAT-1, C-IF-9).
+Open items (detail in [docs/results.md](docs/results.md)): output not rate-capped (worst-case
+data exceeds the raw rate); rANS tables fixed in ROM; fidelity reported as SNR, not
+spike-detection agreement; test-access debug modes on a separate branch (router crash, being
+signed off).
 
 ## Run it
 
