@@ -16,11 +16,16 @@ One clock, 5 MHz = the ADC slot rate (D2). At most one sample per clock; the ADC
 
 ## Blocks
 
-**`project.v` (TT top).** Registers all inputs once; `s_strobe` and `m_ack` are edge-detected
-into one-clock pulses. A strobe carries one 10-bit sample (`ui_in` + `uio[1:0]`, `s_frame` =
-slot 0), or a config byte (address, then data) while `cfg_en` = 1. Output: byte on `uo_out`,
-`m_valid`/`m_last` on `uio[6]/[7]`, host pulses `m_ack`. The pin path manages one sample per 2
-clocks at most: it is for slow real-data tests (C-IF-9).
+**`project.v` (TT top).** Pin CDC: `rst_n` goes through a 2-flop reset synchroniser (async
+assert, sync release; the synchronised reset is the only reset inside the chip); `s_strobe`
+and `cfg_en` through 2-flop synchronisers, the strobe edge-detected on stage 2/3; `s_frame`
+sampled with strobe stage 1; the sample bus loaded once, one clock after strobe stage 1, while
+the host still holds it, by a clock gate whose enable is built from flop outputs only (no raw
+pin reaches a gate enable; the stage-1 MTBF argument is in `project.v`). A strobe carries one
+10-bit sample (`ui_in` + `uio[1:0]`, `s_frame` = slot 0), or a config byte (address, then
+data) while `cfg_en` = 1. Output: byte on `uo_out`, `m_valid`/`m_last` on `uio[6]/[7]`, all
+from one output register stage (D8: no ack). The pin path manages one sample per 2 clocks at
+most (C-IF-9).
 
 **`nlc_cfg`.** Registers: enable (CTRL[7]; the mode bits CTRL[1:0] are ignored, lossy only),
 `n_sel` (1-8), slot per channel (ascending). `enable` = 0 clears the core. The registers of

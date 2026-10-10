@@ -21,19 +21,24 @@ Pins (`src/project.v`):
 |---|---|---|
 | `ui_in[7:0]` | in | sample bits 7:0, or a config byte while `cfg_en` = 1 |
 | `uio[1:0]` | in | sample bits 9:8 |
-| `uio[2]` | in | `s_strobe`: rising edge = one slot (or one config byte) |
+| `uio[2]` | in | `s_strobe`: rising edge = one slot (or one config byte); asynchronous, synchronised on chip |
 | `uio[3]` | in | `s_frame`: high with the strobe of slot 0 |
-| `uio[4]` | in | `m_ack`: rising edge = host took the byte on `uo_out` |
-| `uio[5]` | in | `cfg_en`: strobes carry config bytes, address then data |
+| `uio[4]` | out | `overflow`: sticky, the coder fell a frame behind and dropped a packet (cleared by enable = 0) |
+| `uio[5]` | in | `cfg_en`: strobes carry config bytes, address then data; asynchronous, synchronised on chip |
 | `uio[6]` | out | `m_valid` |
 | `uio[7]` | out | `m_last`: this byte ends a packet |
-| `uo_out[7:0]` | out | output byte |
+| `uo_out[7:0]` | out | output byte; config readback (below) |
 
 1. With `cfg_en` = 1, write (address, data) pairs: `0x00` = 0x01 (lossy mode), `0x01` = number
    of channels (1-8), `0x10 + i` = slot of channel i (strictly ascending), then `0x00` = 0x81
    (enable).
 2. Feed samples: one strobe per slot, at most one every 2 clocks, frames of at least 64 clocks.
-3. Read bytes: wait for `m_valid`, take `uo_out` and `m_last`, pulse `m_ack`, wait 2 clocks.
+3. Read bytes: every clock with `m_valid` = 1 carries a byte on `uo_out` (`m_last` = 1: the
+   packet's last byte). `m_last` = 1 with `m_valid` = 0 is the abort token: drop the partial
+   packet. All outputs are registered.
+4. Config readback (while `CTRL.enable` = 0): `cfg_en` = 1, strobe an address byte, wait 4
+   clocks, read the register on `uo_out` (CTRL reads `{enable, 0000000}`), drop `cfg_en`
+   without a data strobe (nothing is written).
 
 Decode with the Python model in the repository (`model/nlc/packet.py`, `decode_packet`).
 

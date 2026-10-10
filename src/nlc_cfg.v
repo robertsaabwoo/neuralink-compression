@@ -13,9 +13,17 @@ module nlc_cfg #(
     input  wire [7:0]           cfg_data,
     output reg                  enable,
     output reg  [SEL_W:0]       n_sel,
-    output wire [8*N_SEL-1:0]   sel_slots
+    output wire [8*N_SEL-1:0]   sel_slots,
+    output wire [7:0]           rdata        // readback: the register at cfg_addr (DFT)
 );
 `include "nlc_regs.vh"
+
+  // Readback (DFT, TT pins: project.v): CTRL = {enable, 7'b0} (the mode bits are not
+  // stored), N_SEL, the slot registers; other addresses read 0. Combinational from cfg_addr.
+  wire [7:0] slot_off = cfg_addr - REG_SEL_SLOT;
+  assign rdata = (cfg_addr == REG_CTRL)  ? {enable, 7'b0} :
+                 (cfg_addr == REG_N_SEL) ? {{(7-SEL_W){1'b0}}, n_sel} :
+                 (slot_off < N_SEL)      ? sel_slots[8*slot_off[SEL_W-1:0] +: 8] : 8'd0;
 
   // Slot registers: storage written before use (hosts write the slots before setting
   // enable, nlc_regs.vh), so no reset; one gated register each (plain flops, no hold mux).

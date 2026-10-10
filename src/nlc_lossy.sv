@@ -75,6 +75,12 @@ module nlc_lossy #(
   localparam int S_MAX  = 31;
   localparam int ESC    = 2 * S_MAX + 1;
 
+  // Async clear built from logic, glitch-free with a synchronous release: rst_n is the TT
+  // top's synchronised reset (project.v) and enable a flop that rst_n clears, so clr_n only
+  // changes once per event: rst_n falling (enable falls after it: no 0-1-0), rst_n rising
+  // (enable is 0 then: no change), enable changing on a clock edge (a config write). The
+  // rANS clear clr_n && !skip likewise: skip changes on clk_l edges, and its own async clear
+  // follows clr_n falling, when the AND is already 0. STA checks recovery / removal of both.
   logic clr_n;
   assign clr_n = rst_n && enable;
 

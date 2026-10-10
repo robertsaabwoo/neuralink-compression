@@ -46,6 +46,8 @@ module nlc_slot_sel #(
   // Clock gating: while disabled (enable = 0) the block is cleared asynchronously and
   // sees no clock edge. Enabled, only the slot counter runs on every slot (gclk_s); the
   // selection state and the sample register change on a hit or s_frame only (gclk_h).
+  // rst_n: the synchronised reset; enable: a flop cleared by it. Glitch-free, synchronous
+  // release (the argument is at clr_n in nlc_lossy.sv).
   wire clr_n = rst_n && enable;
   wire take  = s_valid && (hit || s_frame);
   wire gclk_s, gclk_h;

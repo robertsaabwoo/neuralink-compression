@@ -56,7 +56,7 @@ pinout:
   uio[1]: "SAMPLE9 (in)"
   uio[2]: "S_STROBE (in)"
   uio[3]: "S_FRAME (in)"
-  uio[4]: ""
+  uio[4]: "OVERFLOW (out)"
   uio[5]: "CFG_EN (in)"
   uio[6]: "M_VALID (out)"
   uio[7]: "M_LAST (out)"

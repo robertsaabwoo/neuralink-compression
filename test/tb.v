@@ -53,5 +53,6 @@ module tb ();
   wire [7:0] m_data  = uo_out;
   wire       m_valid = uio_out[6];
   wire       m_last  = uio_out[7];
+  wire       overflow = uio_out[4];
 
 endmodule
