@@ -24,7 +24,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y iverilog
       - run: pip install -e ".[sim]"
       - run: python scripts/gen_vectors.py --out test/vectors
-      # Harness self-test (replay mock, all modes), then the real design (modes 0/2/3 skip: D1)
+      # Harness self-test (replay mock), then the real design: plumbing, lossy, abort token at the pins
       - run: make -C test ENCODER=replay
       - run: python -m cocotb_tools.check_results test/results.xml
       - run: make -C test
@@ -32,5 +32,9 @@ jobs:
       - run: make -C test/rans TOP=static && python -m cocotb_tools.check_results test/rans/results.xml
       - run: make -C test/rans TOP=adaptive && python -m cocotb_tools.check_results test/rans/results.xml
       - run: make -C test/lossy && python -m cocotb_tools.check_results test/lossy/results.xml
-      # nlc_core at the real 256-slot interface: T-IF-* only (T1 tier; the rest is T2, check.py)
-      - run: NLC_SKIP_KNOWN=1 make -C test/core COCOTB_TEST_FILTER=t_if_ && python -m cocotb_tools.check_results test/core/results.xml
+      # nlc_core at the real 256-slot interface (T1 tier; the full suite is T2, check.py):
+      # T-IF-*, T-BW-3 (II=1 worst-case throughput), the abort paths T-ROB-2 (disable
+      # mid-packet) and T-ROB-4 (frame faults, short frame = abort). ~5 min on a laptop.
+      - run: make -C test/core COCOTB_TEST_FILTER=t_if_ && python -m cocotb_tools.check_results test/core/results.xml
+      - run: make -C test/core COCOTB_TEST_FILTER=t_bw_3 && python -m cocotb_tools.check_results test/core/results.xml
+      - run: make -C test/core COCOTB_TEST_FILTER='t_rob_[24]' && python -m cocotb_tools.check_results test/core/results.xml
