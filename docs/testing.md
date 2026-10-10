@@ -22,6 +22,11 @@ Quick view of everything from a terminal: `python scripts/status.py`.
 `--only`, `--quick`, `--native`, `--update-baseline`). `make` in a cocotb folder cannot take a
 `|` in `COCOTB_TEST_FILTER` (the shell pipes it); use a prefix or a character class.
 
+Data: real-data tests read the challenge WAVs from `data/raw` (743 files, flat, sorted-name
+order; 300+ held out). The download URL is dead (404), so `scripts/fetch_data.py` takes a local
+`data.zip` (README.md, Data). Without `data/raw` the tests fall back to synthetic data and
+print one `NO REAL DATA` warning; CI always runs synthetic.
+
 `check.py` runs inside the `nlc-flow` image (build once: `python docker/fetch_inputs.py && docker build -t nlc-flow docker`).
 Results: `reports/latest/summary.md`, `reports/latest/metrics.json`, logs and netlists next to them.
 
@@ -41,7 +46,7 @@ Results: `reports/latest/summary.md`, `reports/latest/metrics.json`, logs and ne
 | suite | DUT | tests | checks |
 |---|---|---|---|
 | `test/lossy` | `nlc_lossy` (wavelet, shared lifter, rANS, serialiser) | `adjacent_slots_short_frames` (8 channels back to back, 64-slot frames: below the D9 rate, a functional check on real data), `spread_slots_256` (8 of 256 slots, one slot per clock), `power_window` (1 packet at the operating point) | bytes == model, **then decoded** by the model; `overflow` = 0; prints bits/sample and SNR. Real challenge data (files 300+, not in ROM training) or synthetic if `data/raw` is absent |
-| `test/rans` | `rans_tdm_static`, `rans_tdm_adaptive` (`src/robs_rANS`) | static: reset table, loaded tables + reload, full-rate II=1, writes ignored while packet open; adaptive: random gaps + backpressure, full-rate II=1 | bytes == model, decoded |
+| `test/rans` | `rans_tdm_static`, `rans_tdm_adaptive` (`test/rans/ref`, reference RTL, not in silicon) | static: reset table, loaded tables + reload, full-rate II=1, writes ignored while packet open; adaptive: random gaps + backpressure, full-rate II=1 | bytes == model, decoded |
 | `test/` (TT top) | `tt_um_nlc_compressor` through the pins | `test_plumbing`: config registers, slot selector, config readback (T-IF-6), overflow pin (T-IF-7); `test_modes`: **lossy**; `test_power`: T-PWR-3 scenarios | bytes == vectors from `scripts/gen_vectors.py` (32-slot frames, 2 clocks per slot) |
 | `test/` with `ENCODER=replay` | TT top with `test/mock/nlc_encoder_replay.v` | same, minus the overflow pin (needs the real encoder) | harness self-test: pins, config, readback, slot selector, output capture with the golden bytes replayed |
 | `test/core` | `nlc_core` (slot selector, encoder, config) at the real interface: 256 slots, one per clock (II = 1, D9), 200 ns | T-IF-1/2/3, T-BW-1/3, T-ROB-1..7, T-PWR-2 (T-ROB-1 needs `NLC_LONG=1`) | environment `test/env/nlc_env.py` (4.1): ADC mux, config port, host model (takes every byte, D8), scoreboard by seq, monitors for latency/bandwidth/coverage; one JSON per test in `$NLC_RESULTS` |
@@ -213,7 +218,7 @@ Aborts are covered by T-IF-3, T-ROB-2/4/7 and the overflow pin by T-IF-7.
 | T-ROB-2 | Reset and disable at random points (mid-frame, mid-packet, during flush; the host-stall point retired by D8); next run == fresh run | bit-exact, no hang | C-IF-6 | exists, pass |
 | T-ROB-3 | Config written while enabled (illegal), then disable/enable | no hang; correct afterwards | C-IF-7 | exists, pass |
 | T-ROB-4 | Frame faults: early `s_frame` (3 variants), late, missing; strict against the frame rule D5 | bit-exact; a short frame aborts its packet (token, seq gap) | C-IF-8, C-OVF-1..4 | exists, pass |
-| T-ROB-5 | Power-up state: Verilator 2-state with random register init (several seeds) and Icarus/GL with X-init; output identical | identical bytes for all seeds; no X on outputs after the first frame | C-FN-6 | exists, pass (random deposit, 234 regs, 3 seeds) |
+| T-ROB-5 | Power-up state: random contents deposited into every register without reset (Icarus, `t_rob_5`, several seeds); X-init is covered by every other Icarus/GL test, where the env fails on X/Z on `m_valid`/`m_abort` (and `m_data`/`m_last` with `m_valid`). No Verilator 2-state run exists | identical bytes for all seeds; no X on outputs after reset | C-FN-6 | exists, pass (random deposit, 234 regs, 3 seeds) |
 | T-ROB-6 | Random regression: N seeded runs mixing data source, n_sel and slots (the random host was retired by D8; nightly) | 0 failures; failing seed reproducible | all C-FN, C-IF | exists, pass (4 seeds) |
 | T-ROB-7 | `rst_n` mid-packet, during the flush (host-stall point retired by D8) | output empty right after reset; next run == run from power-up (D7) | C-IF-6 | exists, pass |
 

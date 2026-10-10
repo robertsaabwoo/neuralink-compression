@@ -27,6 +27,7 @@ Times are clock indices (one per falling edge); us = clocks * clk_ns / 1000.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from collections import Counter, deque
@@ -64,11 +65,19 @@ def codec() -> LossyCodec:
 # ---------------------------------------------------------------------------
 
 _REAL: np.ndarray | None = None
+_WARNED = False
+
+
 def _real() -> np.ndarray | None:
-    global _REAL
+    global _REAL, _WARNED
     raw = ROOT / "data" / "raw"
     if _REAL is None and raw.exists():
         _, _REAL = load_challenge(raw, N_SEL_HW, first_file=300)   # not in the ROM training set
+    if _REAL is None and not _WARNED:
+        _WARNED = True
+        logging.getLogger("cocotb.nlc_env").warning(
+            "*** NO REAL DATA: %s missing, source 'real' falls back to SYNTHETIC data "
+            "(README.md, Data) ***", raw)
     return _REAL
 
 

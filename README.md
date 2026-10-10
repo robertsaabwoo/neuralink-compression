@@ -44,6 +44,18 @@ pytest                   # golden model only, no Docker (30 s)
 
 Results land in `reports/latest/summary.md`.
 
+### Data
+
+Real-data results use the Neuralink compression-challenge recordings (1 h of non-human
+primate motor cortex, 743 mono 16-bit WAV files, ~19.5 kHz, one electrode per file, 143 MB
+`data.zip`). The published URL (`https://content.neuralink.com/compression-challenge/data.zip`)
+returns 404 since 2026-10-06 and the repo does not redistribute the data, so get a copy of
+`data.zip` from the challenge (or anyone who has it) and run
+`python scripts/fetch_data.py path/to/data.zip`. Expected layout: `data/raw/<uuid>.wav`, all
+743 files flat in one folder; files are used in sorted-name order (the first 32 train the rANS ROM,
+300+ are held out for the RTL tests). Without `data/raw` every "real" test and the vectors run
+on synthetic data instead and print a `NO REAL DATA` warning; CI is synthetic only.
+
 ## Docs
 
 | doc | what |

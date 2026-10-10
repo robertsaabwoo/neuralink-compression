@@ -3,8 +3,8 @@
   python scripts/fetch_data.py                 # download from the published URL
   python scripts/fetch_data.py path/to/data.zip   # use a local copy
 
-The published URL returned 404 on 2026-10-06; use a local copy of data.zip
-(143 MB) if it is still down.
+The published URL returns 404 (checked 2026-10-06 and 2026-10-10); use a local copy of
+data.zip (143 MB). Result: data/raw/<uuid>.wav, 743 files flat (README.md, Data).
 """
 
 from __future__ import annotations
