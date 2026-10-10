@@ -158,6 +158,9 @@ def main() -> None:
         return ".".join(plain(p.replace("\\", "")) if "\\" in p else p for p in parts)
 
     sdf, n_sdf = SDF_ID.subn(sdf_name, sdf)
+    # header triples without a typ value ("(VOLTAGE 1.800::1.800)"): both simulators complain
+    sdf = re.sub(r"\((VOLTAGE|PROCESS|TEMPERATURE) (\"?)([-\d.]+)::([-\d.]+)\2\)",
+                 r"(\1 \2\3:\3:\4\2)", sdf)
     log.append(f"escaped identifiers made plain: {n_nl} in the netlist (sim_nl.v), "
                f"{n_sdf} SDF names")
     (a.out / "sim.sdf").write_text(sdf)

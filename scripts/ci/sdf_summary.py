@@ -28,23 +28,35 @@ def main() -> None:
     ap.add_argument("--results", type=Path, required=True)
     ap.add_argument("--sdf-log", type=Path)
     ap.add_argument("--selfcheck-log", type=Path)
+    ap.add_argument("--lib", type=Path, help="cell models the run used (names the check)")
     a = ap.parse_args()
+    lib = a.lib.read_text().splitlines() if a.lib and a.lib.exists() else []
+
+    def check_of(line: str) -> str:
+        """CVC names the model line, not the check: look the line up in the library."""
+        m = CHECK.search(line)
+        if m:
+            return m.group(1).lower()
+        m = re.search(r"sky130_fd_sc_hd\.v\((\d+)\)", line)
+        if m and int(m.group(1)) <= len(lib):
+            c = CHECK.search(lib[int(m.group(1)) - 1])
+            if c:
+                return c.group(1).lower()
+        return "?"
 
     print(f"## T-GL-3 SDF gate level: {a.sim}, {a.corner}\n\n{a.run}\n")
-    print("| test | result | sim time (ns) | wall (s) |\n|---|---|---|---|")
+    print("| test | result | wall (s) |\n|---|---|---|")
     if a.results.exists():
         for tc in ET.parse(a.results).getroot().iter("testcase"):
             res = ("FAIL" if tc.find("failure") is not None or tc.find("error") is not None
                    else "skip" if tc.find("skipped") is not None else "pass")
-            print(f"| {tc.get('name')} | {res} | {tc.get('sim_time_ns', '')} | "
-                  f"{float(tc.get('time', 0)):.0f} |")
+            print(f"| {tc.get('name')} | {res} | {float(tc.get('time', 0)):.0f} |")
     else:
-        print("| (no results.xml) | FAIL | | |")
+        print("| (no results.xml) | FAIL | |")
 
     lines = a.log.read_text(errors="replace").splitlines() if a.log.exists() else []
     viol = [l for l in lines if VIOL.search(l)]
-    kinds = collections.Counter((CHECK.search(l).group(1).lower() if CHECK.search(l) else "?")
-                                for l in viol)
+    kinds = collections.Counter(check_of(l) for l in viol)
     insts = collections.Counter(INST.search(l).group(1) if INST.search(l) else "?" for l in viol)
     print(f"\n**timing-check violations: {len(viol)}**"
           + ("" if a.sim != "icarus" else " (Icarus does not run timing checks)"))
@@ -63,8 +75,9 @@ def main() -> None:
         st = (a.selfcheck_log.read_text(errors="replace").splitlines()
               if a.selfcheck_log.exists() else [])
         sv = [l for l in st if VIOL.search(l)]
+        sk = collections.Counter(check_of(l) for l in sv)
         print(f"\ntiming-check self-test (test_sdf: cfg_en swept through the clock edge): "
-              f"{len(sv)} violations, " + ("checks are live" if sv else "**checks NOT live**"))
+              f"{len(sv)} violations ({dict(sk)}), " + ("checks are live" if sv else "**checks NOT live**"))
         if sv:
             print("```\n" + "\n".join(sv[:5]) + "\n```")
 
