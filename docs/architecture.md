@@ -152,8 +152,8 @@ checks the RTL against it every clock):
 
 | | value |
 |---|---|
-| area | TT top 48,518 um^2 synth (the lossy core alone was 128,000 um^2 on 2026-10-07); 3x2 tiles, post-CTS utilisation 0.553 (D10) |
-| storage | 337 flops + per-channel latch rows + 126 clock gates (TT top) |
+| area | TT top 49,979 um^2 synth, of which DFT modes +1,461 (F28) (the lossy core alone was 128,000 um^2 on 2026-10-07); 3x2 tiles, post-CTS utilisation 0.560 (D10) |
+| storage | 346 flops + per-channel latch rows + 127 clock gates (TT top) |
 | state per channel | 146 b: 124 sample/wavelet + 22 coder (Neuralink spike path: 226 b/ch) |
 | timing | +129.0 ns setup slack at ss / 200 ns, +0.187 ns hold at ff (pre-layout); latch D pins excluded from place-and-route setup repair (`src/pnr.sdc`, results.md F24) |
 | power | routed, real data, signed off (e13 RTL, before the area round): 34.8 uW running / 9.5 uW idle for the TT top, core 23.8 / 0.80. Final RTL: preview only, synthetic data (results.md, Budgets) |

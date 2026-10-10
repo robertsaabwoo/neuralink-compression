@@ -41,6 +41,7 @@ definition) is resolved (C-LAT-1 restated 2026-10-10). Open: F27 (OpenROAD CTS b
 | F25 | **Throughput with the valid-only output (D8) is bounded by 1 byte/clock, not by the coder.** `scripts/proofs/output_bound.py` (no FIFO, 1 byte/clock, every symbol 4 bytes, 8 adjacent channels: 128 bytes/frame worst case), minimum slack in clocks: 256-clock frames +138, 192 +74, 128 +10 (inside the model's +-2 clocks/stage), 96 -54, 64 -118; a single-cycle divider gives the same numbers. So no data can abort a packet at the real rate (II = 1, 256 clocks/frame, D9), while worst-case data can at the TT pin path's 64-clock test frames (real data does not). Measured worst case (LFSR, T-BW-1): 101 bytes/frame. RTL check: T-BW-3 | proof, T-BW-1 | C-IF-9, C-OVF-5 |
 | F26 | **Pin CDC and test access (a0966c0): synth 47.5k (stack) -> 48.5k um^2, ~+2.3 uW idle.** 2-flop reset synchroniser (recovery slack 160.5 ns from the pin, 196.6 ns from the synchroniser), 2-flop synchronisers on `s_strobe` / `cfg_en`, sample bus loaded by a gate whose enable comes from flops only, registered outputs (+1 clock latency), sticky overflow on `uio[4]`, config readback on `uo_out` (~630 um^2 of the total). The idle cost is the always-clocked pin flops (preview, synthetic data) | synth, STA, `cts_preview` | C-IF-11/12, C-PWR-2 |
 | F27 | **OpenROAD CTS left one clock gate without CLK on the final RTL; placement density 64 avoids it.** CTS reports 101 sinks on the gated clock `core.u_enc.u_lossy.clk_i` and finishes with 100; the missing sink is a `g_ch[7]` `dlclkp` (`u_qa`, `u_o1`, `u_o3` or `u_dp2` depending on placement) whose CLK pin is unconnected in CTS's own output netlist. Failing: the final RTL at 2x2 and at 3x2 with `PL_TARGET_DENSITY_PCT` 60 (also with `CTS_SINK_CLUSTERING_ENABLE` false, and with timing- or routability-driven placement off), and the stack at 4x2. Placement sweep (nightly 38059238643): density 56, 64, 68, 72 and 76 keep all 126 clock gates connected; 64 chosen (post-CTS hold +0.251 ns, the best of the clean variants). The flow is deterministic for a given placement, so a clean preview means a clean sign-off CTS. Root cause in OpenROAD not found; the layout gate-level test and LibreLane's DisconnectedPins check catch it, so it cannot reach silicon unnoticed | `cts_preview`, nightly sweep, CTS log, post-CTS netlist | C-FN-5, C-AREA-5 |
+| F28 | **DFT debug modes (D11, 566d633): +1,461 um^2 synth (48,518 -> 49,979, +3.0%), +9 flops (337 -> 346), +1 clock gate (127); preview +0.33 uW running, +0.21 uW idle.** Mode 1 raw bypass (2 flops, 1 gate, output mux), mode 2 gate observation (one-hot group select, per-block AND-OR to 8 bits, reuses the output register: no new flops), the `DBG` register (6 flops). Setup ss +128.6 ns, hold ff +0.187 ns (pre-layout, unchanged). `cts_preview` 38062369302 vs 38060355764 (c8fd3b5): utilisation 0.553 -> 0.560, post-CTS hold +0.249 -> +0.248 ns, running 35.22 -> 35.55 uW, idle 9.52 -> 9.73 uW (synthetic data); all 127 `dlclkp` have CLK. The idle increase is one max-cap repair buffer on `ld_frame` (toggles with every strobe, also when idle), inserted for the new load: the observation logic. Isolating `ld_frame`/`ld_data` with fixed and2 cells at the source removed it (idle 9.58 uW, preview 38063323019) but moved placement and brought F27 back (a `g_slot[3]` gate without CLK), so it was reverted | synth, STA, T-IF-8/9, `cts_preview` | C-IF-13/14, C-PWR-2 |
 
 ## Budgets
 
@@ -48,7 +49,7 @@ Final candidate = branch `area4-final-3x2` (RTL a0966c0, 3x2 tiles) unless state
 
 | metric | value | limit / target | status |
 |---|---|---|---|
-| cell area | TT top 48,518 um^2 synth (337 flops, 126 clock gates); the lossy core alone was not re-measured (62,200 um^2 on 2026-10-08, before F22) | lossy core 173,000 / 86,600 | PASS |
+| cell area | TT top 49,979 um^2 synth with the DFT modes (346 flops, 127 clock gates; F28), 48,518 before; the lossy core alone was not re-measured (62,200 um^2 on 2026-10-08, before F22) | lossy core 173,000 / 86,600 | PASS |
 | TT design utilisation (3x2, D10) | 0.553 post-CTS (`cts_preview` 38058666284); pre-DFT all-in 3x2 signed off at 0.542 (38025684427) | 70% / 60% | PASS |
 | setup slack, ss, 200 ns | +129.0 ns (pre-layout) | >= 0 / 60 | PASS |
 | hold slack, ff | +0.187 ns pre-layout; +0.250 ns post-CTS (preview) | >= 0 | PASS |
@@ -68,7 +69,7 @@ Final candidate = branch `area4-final-3x2` (RTL a0966c0, 3x2 tiles) unless state
 | `test/core` (II = 1, 256-slot frames) | 40 pass, 0 fail; T-BW-3 new, not run yet |
 | `test/lossy` (incl. power scenarios) | 8 pass |
 | `test/rans` | 6 pass (2026-10-08) |
-| TT top through the pins, 200 ns | 5/5 (config, slot selector, readback, overflow pin, lossy); replay 4 pass, 1 skip |
+| TT top through the pins, 200 ns | 7/7 (config, slot selector, readback, overflow pin, lossy, T-IF-8 raw bypass, T-IF-9 gate observation); gate level (Yosys netlist): lossy, T-IF-8, T-IF-9 (idle part) pass |
 | gate level: lossy core, TT top netlist | pass, pass |
 | latch pre-check (place-and-route SDC) | 0 latch D endpoints below margin (F24) |
 | layout (`cts_preview`) | **fail: F27** (a clock gate without CLK after CTS) |
