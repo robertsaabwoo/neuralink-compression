@@ -28,6 +28,8 @@
   "//": "only real violations (none at 200 ns) are repaired.",
   "PL_RESIZER_SETUP_REPAIR_TNS_PCT": 0,
   "GRT_RESIZER_SETUP_REPAIR_TNS_PCT": 0,
+  "//": "nlc: place-and-route SDC = sign-off SDC + latch D pins out of setup repair (src/pnr.sdc).",
+  "PNR_SDC_FILE": "dir::pnr.sdc",
 
   "//": "RUN_LINTER, LINTER_INCLUDE_PDK_MODELS - Disabling the linter is not recommended!",
   "RUN_LINTER": 1,
